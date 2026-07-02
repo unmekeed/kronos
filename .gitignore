@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Secrets
+.env
+
+# Runtime artifacts
+logs/
+data/*.csv
+reports/
+state/
+
+# Model cache
+models/
+.cache/
+
+# IDE
+.idea/
+.vscode/
