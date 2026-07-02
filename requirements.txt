@@ -1,0 +1,19 @@
+# Core
+numpy>=1.24
+pandas>=2.0
+pyyaml>=6.0
+python-dotenv>=1.0
+requests>=2.31
+psutil>=5.9
+
+# Exchange
+ccxt>=4.0
+
+# Model (Kronos-mini). Torch is required only for live inference,
+# tests and backtest can run with the built-in mock forecaster.
+# torch>=2.1
+# huggingface_hub>=0.20
+
+# The Kronos model code is not on PyPI. For live inference clone it next to
+# this repo and add it to PYTHONPATH (see README, section "Kronos-mini"):
+#   git clone https://github.com/shiyu-coder/Kronos.git
