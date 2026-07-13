@@ -1,0 +1,53 @@
+# CI-конвейер монорепозитория (Гл. 10.4 спецификации).
+# Фаза 1: lint + unit-тесты Go-сервисов, валидация схем.
+# Последующие фазы добавят contract-tests, сборку образов, подпись и SBOM.
+name: ci-cd-pipeline
+
+on:
+  push:
+    paths: ["dota-ai-analyst/**"]
+  pull_request:
+    paths: ["dota-ai-analyst/**"]
+
+defaults:
+  run:
+    working-directory: dota-ai-analyst
+
+jobs:
+  go-lint-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [api-gateway]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: dota-ai-analyst/apps/${{ matrix.service }}/go.sum
+      - name: Vet
+        run: go vet ./...
+        working-directory: dota-ai-analyst/apps/${{ matrix.service }}
+      - name: Test
+        run: go test -race -cover ./...
+        working-directory: dota-ai-analyst/apps/${{ matrix.service }}
+      - name: Build
+        run: go build ./...
+        working-directory: dota-ai-analyst/apps/${{ matrix.service }}
+
+  schemas-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate JSON schemas parse
+        run: |
+          python3 - <<'EOF'
+          import json, glob, sys
+          files = glob.glob("libs/schemas/*.json")
+          assert files, "no schemas found"
+          for f in files:
+              json.load(open(f))
+              print("OK", f)
+          EOF
+      - name: Validate compose file
+        run: docker compose -f deployments/docker-compose.yml config -q
