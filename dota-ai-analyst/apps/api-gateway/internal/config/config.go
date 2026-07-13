@@ -14,6 +14,14 @@ type Config struct {
 	ShutdownTimeout time.Duration
 	RateLimitRPS    int
 	RateLimitBurst  int
+
+	S3Endpoint  string
+	S3AccessKey string
+	S3SecretKey string
+	S3Bucket    string
+	S3UseSSL    bool
+
+	KafkaBrokers []string
 }
 
 func Load() Config {
@@ -23,6 +31,14 @@ func Load() Config {
 		ShutdownTimeout: getDuration("GATEWAY_SHUTDOWN_TIMEOUT", 10*time.Second),
 		RateLimitRPS:    getInt("GATEWAY_RATE_LIMIT_RPS", 20),
 		RateLimitBurst:  getInt("GATEWAY_RATE_LIMIT_BURST", 40),
+
+		S3Endpoint:  getEnv("S3_ENDPOINT", "localhost:9500"),
+		S3AccessKey: getEnv("S3_ACCESS_KEY", "dota"),
+		S3SecretKey: getEnv("S3_SECRET_KEY", "dota_dev_password"),
+		S3Bucket:    getEnv("S3_BUCKET", "replays"),
+		S3UseSSL:    getEnv("S3_USE_SSL", "false") == "true",
+
+		KafkaBrokers: []string{getEnv("KAFKA_BROKERS", "localhost:9092")},
 	}
 }
 

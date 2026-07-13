@@ -3,15 +3,21 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/dota-ai-analyst/api-gateway/internal/events"
+	"github.com/dota-ai-analyst/api-gateway/internal/middleware"
+	"github.com/dota-ai-analyst/api-gateway/internal/storage"
 )
 
 // Handlers объединяет зависимости HTTP-обработчиков шлюза.
 type Handlers struct {
-	DB *pgxpool.Pool
+	DB      *pgxpool.Pool
+	Replays *storage.ReplayStore
 }
 
 // problem — тело ошибки в формате RFC 7807 (Гл. 7.5).
@@ -51,9 +57,9 @@ func (h *Handlers) Readyz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
-// UploadReplay принимает файл реплея и ставит задание в очередь (UC-01).
-// Каркасная версия: регистрирует AnalysisJob в PostgreSQL и отвечает 202;
-// публикация в Kafka и выгрузка в S3 подключаются в Фазе 2.
+// UploadReplay принимает файл реплея и ставит задание в очередь (UC-01):
+// файл выгружается в S3, затем в одной транзакции создаются AnalysisJob и
+// outbox-событие match.downloaded; relay доставит его в Kafka (Гл. 2.5).
 func (h *Handlers) UploadReplay(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(64 << 20); err != nil {
 		writeProblem(w, http.StatusBadRequest,
@@ -68,29 +74,66 @@ func (h *Handlers) UploadReplay(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Минимальная валидация: непустой файл с расширением .dem (SEC: полная
-	// проверка магии формата выполняется парсером в изолированной среде).
+	// Минимальная валидация: непустой файл (SEC: полная проверка магии
+	// формата выполняется парсером в изолированной среде).
 	if header.Size == 0 {
 		writeProblem(w, http.StatusBadRequest, "invalid-replay", "Empty file", "")
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	var jobID string
-	err = h.DB.QueryRow(ctx,
-		`INSERT INTO AnalysisJobs (status, replay_url) VALUES ('queued', $1) RETURNING job_id`,
-		header.Filename,
-	).Scan(&jobID)
+	traceID, _ := ctx.Value(middleware.TraceIDKey).(string)
+	objectKey := fmt.Sprintf("uploads/%d-%s", time.Now().UnixNano(), header.Filename)
+	replayURL, err := h.Replays.PutReplay(ctx, objectKey, file, header.Size)
 	if err != nil {
+		writeProblem(w, http.StatusInternalServerError,
+			"internal-error", "Failed to store replay", err.Error())
+		return
+	}
+
+	tx, err := h.DB.Begin(ctx)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError,
+			"internal-error", "Failed to begin transaction", err.Error())
+		return
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	var jobID string
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO AnalysisJobs (status, replay_url) VALUES ('queued', $1) RETURNING job_id`,
+		replayURL,
+	).Scan(&jobID); err != nil {
 		writeProblem(w, http.StatusInternalServerError,
 			"internal-error", "Failed to enqueue job", err.Error())
 		return
 	}
 
+	env, err := events.NewEnvelope("match.downloaded", traceID, "job_id:"+jobID, map[string]any{
+		"job_id":     jobID,
+		"replay_url": replayURL,
+		"source":     "user_upload",
+	})
+	if err == nil {
+		err = events.WriteOutbox(ctx, tx, "match.downloaded", env)
+	}
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError,
+			"internal-error", "Failed to write outbox event", err.Error())
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		writeProblem(w, http.StatusInternalServerError,
+			"internal-error", "Failed to commit", err.Error())
+		return
+	}
+
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"job_id":                 jobID,
+		"replay_url":             replayURL,
 		"estimated_time_seconds": 10,
 	})
 }

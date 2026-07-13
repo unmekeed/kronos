@@ -12,8 +12,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/dota-ai-analyst/api-gateway/internal/config"
+	"github.com/dota-ai-analyst/api-gateway/internal/events"
 	"github.com/dota-ai-analyst/api-gateway/internal/handlers"
 	"github.com/dota-ai-analyst/api-gateway/internal/router"
+	"github.com/dota-ai-analyst/api-gateway/internal/storage"
 )
 
 func main() {
@@ -30,7 +32,26 @@ func main() {
 	}
 	defer pool.Close()
 
-	h := &handlers.Handlers{DB: pool}
+	replays, err := storage.NewReplayStore(
+		cfg.S3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Bucket, cfg.S3UseSSL)
+	if err != nil {
+		logger.Error("s3_init_failed", "error", err)
+		os.Exit(1)
+	}
+	if err := replays.EnsureBucket(ctx); err != nil {
+		logger.Error("s3_bucket_failed", "error", err)
+		os.Exit(1)
+	}
+
+	relay, err := events.NewRelay(pool, cfg.KafkaBrokers, logger)
+	if err != nil {
+		logger.Error("kafka_init_failed", "error", err)
+		os.Exit(1)
+	}
+	defer relay.Close()
+	go relay.Run(ctx)
+
+	h := &handlers.Handlers{DB: pool, Replays: replays}
 	srv := &http.Server{
 		Addr:    cfg.ListenAddr,
 		Handler: router.New(h, logger, cfg.RateLimitRPS, cfg.RateLimitBurst),

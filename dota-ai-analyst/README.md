@@ -7,7 +7,7 @@
 
 | Фаза | Состояние | Содержание |
 |---|---|---|
-| **Фаза 1: Инфраструктура** | 🟡 в работе (спринты 1–2 ✅) | compose-инфраструктура, миграции PG/CH, Kafka-топики, каркас API Gateway |
+| **Фаза 1: Инфраструктура** | ✅ завершена (спринты 1–4) | compose-инфраструктура, миграции PG/CH, Kafka-топики, API Gateway (S3+outbox), Data Collector |
 | Фаза 2: Парсинг и ETL | ⚪ не начата | Replay Parser (C++), Data Collector, ETL |
 | Фаза 3: Аналитика и ML | ⚪ не начата | Feature Store, WP/Laning/Draft/Error модели |
 | Фаза 4: UI, MLOps, Релиз | ⚪ не начата | Frontend, дрейф-мониторинг, нагрузочные тесты |
@@ -18,7 +18,8 @@
 - `infra/migrations/` — реляционная схема Гл. 4.2 (7 таблиц, enum-типы, индексы) и аналитическая схема Гл. 4.4 (ReplayEvents, EconomyTimeline, PositionSnapshots).
 - `infra/kafka/create-topics.sh` — 7 топиков реестра Гл. 2.3.1 с retention-политиками.
 - `libs/schemas/event-envelope.schema.json` — JSON Schema конверта события Гл. 2.3.3.
-- `apps/api-gateway` — Go-сервис: `/healthz`, `/readyz` (ping PG), `POST /api/v1/matches/upload` (202 + job в PG), `GET /api/v1/jobs/{id}`, ошибки RFC 7807, trace_id (W3C traceparent), структурированные JSON-логи, in-memory token-bucket rate limit; unit-тесты middleware; distroless Dockerfile.
+- `apps/api-gateway` — Go-сервис: `/healthz`, `/readyz` (ping PG), `POST /api/v1/matches/upload` (файл → MinIO, job + outbox-событие в одной PG-транзакции → 202), `GET /api/v1/jobs/{id}`, ошибки RFC 7807, trace_id (W3C traceparent), JSON-логи, token-bucket rate limit; фоновый **outbox-relay** публикует события в Kafka (`FOR UPDATE SKIP LOCKED`, безопасен при нескольких репликах); unit-тесты; distroless Dockerfile.
+- `apps/data-collector` — Python-сервис: абстракция `Source` (ACL, Гл. 2.5) с реализациями `OpenDotaSource` (pull по match_id-курсору) и `FixtureSource` (dev/тесты); дедупликация по `CollectedMatches`, курсор в `CollectorCursor`, выгрузка `.dem` в MinIO, публикация `match.downloaded`; unit-тесты; Dockerfile.
 
 ## Быстрый старт
 
@@ -43,5 +44,5 @@ curl -X POST localhost:8080/api/v1/matches/upload -F "file=@replay.dem"
 
 ## Следующие шаги
 
-1. Фаза 1, спринты 3–4: обвязка Data Collector (публикация `match.downloaded`), выгрузка `.dem` в MinIO из шлюза, Schema Registry.
-2. Фаза 2: ядро Replay Parser (C++), ETL-конвейер до ClickHouse.
+1. Фаза 2 (спринты 5–6): ядро Replay Parser (C++) — DemoReader, EntityDecoder, извлечение позиций/экономики из `.dem`.
+2. Фаза 2 (спринты 7–8): ETL-конвейер `replay.parsed` → валидация → ClickHouse/PostgreSQL → `features.calculated`.
