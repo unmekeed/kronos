@@ -8,7 +8,7 @@
 | Фаза | Состояние | Содержание |
 |---|---|---|
 | **Фаза 1: Инфраструктура** | ✅ завершена (спринты 1–4) | compose-инфраструктура, миграции PG/CH, Kafka-топики, API Gateway (S3+outbox), Data Collector |
-| Фаза 2: Парсинг и ETL | ⚪ не начата | Replay Parser (C++), Data Collector, ETL |
+| Фаза 2: Парсинг и ETL | 🟡 в работе (спринт 5 ✅) | Replay Parser (C++): DemoReader готов, проверен на реальном 110МБ реплее (62 мс/проход) |
 | Фаза 3: Аналитика и ML | ⚪ не начата | Feature Store, WP/Laning/Draft/Error модели |
 | Фаза 4: UI, MLOps, Релиз | ⚪ не начата | Frontend, дрейф-мониторинг, нагрузочные тесты |
 
@@ -42,7 +42,9 @@ curl -X POST localhost:8080/api/v1/matches/upload -F "file=@replay.dem"
 `proto/` + `openapi/` (контракты — источник истины), `infra/` (миграции, топики, terraform),
 `deployments/` (compose, helm, k8s).
 
+- `apps/replay-parser` — C++17-ядро: DemoReader (mmap, покадровая итерация, snappy), pb_lite (protobuf wire-формат без protoc), разбор CDemoFileHeader/CDemoFileInfo, CLI `demoinfo`; unit-тесты на синтетическом `.dem`. Реальный реплей 8892914077 (110.6 МиБ) читается за 62 мс; файл-эталон в dev-MinIO `s3://replays/fixtures/8892914077.dem`.
+
 ## Следующие шаги
 
-1. Фаза 2 (спринты 5–6): ядро Replay Parser (C++) — DemoReader, EntityDecoder, извлечение позиций/экономики из `.dem`.
-2. Фаза 2 (спринты 7–8): ETL-конвейер `replay.parsed` → валидация → ClickHouse/PostgreSQL → `features.calculated`.
+1. Фаза 2 (спринт 6): EntityDecoder — SendTables/flattened serializers, string tables, позиции и экономика из `DEM_Packet`.
+2. Фаза 2 (спринты 7–8): Go-обвязка парсера (Kafka), ETL-конвейер `replay.parsed` → валидация → ClickHouse/PostgreSQL → `features.calculated`.

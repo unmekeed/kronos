@@ -35,6 +35,19 @@ jobs:
         run: go build ./...
         working-directory: dota-ai-analyst/apps/${{ matrix.service }}
 
+  cpp-parser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install snappy
+        run: sudo apt-get update && sudo apt-get install -y libsnappy-dev
+      - name: Configure
+        run: cmake -B build -S apps/replay-parser -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build -j4
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
   schemas-validate:
     runs-on: ubuntu-latest
     steps:

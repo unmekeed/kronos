@@ -50,3 +50,12 @@ build:         ## Сборка бинарей
 
 clean:
 	rm -rf bin/
+
+## Replay Parser (C++) ---------------------------------------------------------
+
+parser-build:  ## Собрать ядро парсера и CLI demoinfo
+	cmake -B apps/replay-parser/build -S apps/replay-parser -DCMAKE_BUILD_TYPE=Release
+	cmake --build apps/replay-parser/build -j4
+
+parser-test: parser-build  ## Unit-тесты ядра парсера
+	ctest --test-dir apps/replay-parser/build --output-on-failure
