@@ -27,6 +27,7 @@ type Result struct {
 	MatchID      uint64 `json:"match_id"`
 	EventRows    int    `json:"event_rows"`
 	PositionRows int    `json:"position_rows"`
+	EconomyRows  int    `json:"economy_rows"`
 	DurationMS   int64  `json:"duration_ms"`
 }
 
@@ -74,7 +75,8 @@ func (p *Pipeline) Run(ctx context.Context, replayURL string) (Result, error) {
 
 	eventsPath := filepath.Join(tmp, "events.jsonl")
 	posPath := filepath.Join(tmp, "positions.jsonl")
-	matchID, err := p.runCore(ctx, demPath, eventsPath, posPath)
+	ecoPath := filepath.Join(tmp, "economy.jsonl")
+	matchID, err := p.runCore(ctx, demPath, eventsPath, posPath, ecoPath)
 	if err != nil {
 		return Result{}, err
 	}
@@ -87,11 +89,16 @@ func (p *Pipeline) Run(ctx context.Context, replayURL string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	ecoRows, err := p.loadEconomy(ctx, matchID, ecoPath)
+	if err != nil {
+		return Result{}, err
+	}
 
 	return Result{
 		MatchID:      matchID,
 		EventRows:    evRows,
 		PositionRows: posRows,
+		EconomyRows:  ecoRows,
 		DurationMS:   time.Since(start).Milliseconds(),
 	}, nil
 }
@@ -130,9 +137,9 @@ func (p *Pipeline) download(ctx context.Context, bucket, key, dst string) error 
 var matchIDRe = regexp.MustCompile(`match_id\s*:\s*(\d+)`)
 
 // runCore запускает C++ demoinfo и извлекает match_id из его сводки.
-func (p *Pipeline) runCore(ctx context.Context, dem, events, positions string) (uint64, error) {
+func (p *Pipeline) runCore(ctx context.Context, dem, events, positions, economy string) (uint64, error) {
 	cmd := exec.CommandContext(ctx, p.demoinfo,
-		"--events", events, "--entities", positions, dem)
+		"--events", events, "--entities", positions, "--economy", economy, dem)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = io.Discard
@@ -251,6 +258,54 @@ func (p *Pipeline) loadPositions(ctx context.Context, matchID uint64, path strin
 			Y:        pos.Y,
 			IsAlive:  1,
 			Hero:     pos.Class,
+		})
+	})
+}
+
+// coreEconomy — строка economy.jsonl (сэмплы DataTeamPlayer_t каждые
+// 300 тиков). team: 2 = Radiant, 3 = Dire; slot: 0..4 внутри команды.
+type coreEconomy struct {
+	Tick      uint32 `json:"tick"`
+	Team      int    `json:"team"`
+	Slot      int    `json:"slot"`
+	NetWorth  int64  `json:"net_worth"`
+	TotalGold int64  `json:"total_gold"`
+	TotalXP   int64  `json:"total_xp"`
+	LH        int64  `json:"lh"`
+	DN        int64  `json:"dn"`
+}
+
+func (p *Pipeline) loadEconomy(ctx context.Context, matchID uint64, path string) (int, error) {
+	type row struct {
+		MatchID   uint64 `json:"match_id"`
+		PlayerID  uint64 `json:"player_id"`
+		GameTime  int32  `json:"game_time"`
+		NetWorth  int32  `json:"net_worth"`
+		TotalGold int32  `json:"total_gold"`
+		TotalXP   int32  `json:"total_xp"`
+		LH        uint16 `json:"lh"`
+		DN        uint16 `json:"dn"`
+	}
+	return p.loadJSONL(ctx, "EconomyTimeline", path, func(line []byte, w *json.Encoder) (bool, error) {
+		var ec coreEconomy
+		if err := json.Unmarshal(line, &ec); err != nil {
+			return false, fmt.Errorf("bad economy line: %w", err)
+		}
+		// player_id 0..9: слоты Radiant, затем Dire — сквозная нумерация,
+		// совпадающая с порядком игроков в CDemoFileInfo.
+		playerID := uint64(ec.Slot)
+		if ec.Team == 3 {
+			playerID += 5
+		}
+		return true, w.Encode(row{
+			MatchID:   matchID,
+			PlayerID:  playerID,
+			GameTime:  int32(ec.Tick / ticksPerSecond),
+			NetWorth:  int32(ec.NetWorth),
+			TotalGold: int32(ec.TotalGold),
+			TotalXP:   int32(ec.TotalXP),
+			LH:        uint16(ec.LH),
+			DN:        uint16(ec.DN),
 		})
 	})
 }

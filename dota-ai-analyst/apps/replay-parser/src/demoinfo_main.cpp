@@ -56,10 +56,22 @@ static const char* winner_name(int64_t w) {
     return "Unknown";
 }
 
+// Достать int64 из watched-поля сущности; def — если поля нет.
+static int64_t watched_int(const dota::demo::Entity& e, const char* key,
+                           int64_t def = 0) {
+    auto it = e.watched.find(key);
+    if (it == e.watched.end()) return def;
+    if (auto* u = std::get_if<uint64_t>(&it->second)) return int64_t(*u);
+    if (auto* s = std::get_if<int64_t>(&it->second)) return *s;
+    return def;
+}
+
 static void deep_scan(DemoReader& reader, uint32_t probe_type, int probe_limit,
-                      const char* events_path, const char* entities_path) {
-    bool want_entities = entities_path != nullptr;
+                      const char* events_path, const char* entities_path,
+                      const char* economy_path) {
+    bool want_entities = entities_path != nullptr || economy_path != nullptr;
     FILE* entities_out = entities_path ? std::fopen(entities_path, "w") : nullptr;
+    FILE* economy_out = economy_path ? std::fopen(economy_path, "w") : nullptr;
     using dota::demo::InnerMsg;
     namespace demo = dota::demo;
     namespace pb = dota::pb;
@@ -141,6 +153,32 @@ static void deep_scan(DemoReader& reader, uint32_t probe_type, int probe_limit,
                     }
                 }
             });
+            if (economy_out) {
+                for (const auto& [idx, e] : entities->all()) {
+                    int team;
+                    if (e.class_name == "CDOTA_DataRadiant") team = 2;
+                    else if (e.class_name == "CDOTA_DataDire") team = 3;
+                    else continue;
+                    for (int slot = 0; slot < 5; slot++) {
+                        char key[64];
+                        auto field = [&](const char* name) {
+                            std::snprintf(key, sizeof key,
+                                          "m_vecDataTeam.%d.%s", slot, name);
+                            return watched_int(e, key);
+                        };
+                        std::fprintf(economy_out,
+                            "{\"tick\":%u,\"team\":%d,\"slot\":%d,"
+                            "\"net_worth\":%lld,\"total_gold\":%lld,"
+                            "\"total_xp\":%lld,\"lh\":%lld,\"dn\":%lld}\n",
+                            fr.tick, team, slot,
+                            (long long)field("m_iNetWorth"),
+                            (long long)field("m_iTotalEarnedGold"),
+                            (long long)field("m_iTotalEarnedXP"),
+                            (long long)field("m_iLastHitCount"),
+                            (long long)field("m_iDenyCount"));
+                    }
+                }
+            }
         }
         switch (demo::Cmd(fr.cmd)) {
             case demo::Cmd::Packet:
@@ -318,6 +356,10 @@ static void deep_scan(DemoReader& reader, uint32_t probe_type, int probe_limit,
         std::fclose(entities_out);
         std::printf("  positions written: %s\n", entities_path);
     }
+    if (economy_out) {
+        std::fclose(economy_out);
+        std::printf("  economy written  : %s\n", economy_path);
+    }
 }
 
 int main(int argc, char** argv) {
@@ -326,6 +368,7 @@ int main(int argc, char** argv) {
     const char* path = nullptr;
     const char* events_path = nullptr;
     const char* entities_path = nullptr;
+    const char* economy_path = nullptr;
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--deep") == 0) deep = true;
         else if (std::strcmp(argv[i], "--probe") == 0 && i + 1 < argc) {
@@ -340,10 +383,14 @@ int main(int argc, char** argv) {
             entities_path = argv[++i];
             deep = true;
         }
+        else if (std::strcmp(argv[i], "--economy") == 0 && i + 1 < argc) {
+            economy_path = argv[++i];
+            deep = true;
+        }
         else path = argv[i];
     }
     if (!path) {
-        std::fprintf(stderr, "usage: %s [--deep] [--probe TYPE] [--events OUT.jsonl] [--entities OUT.jsonl] <replay.dem>\n",
+        std::fprintf(stderr, "usage: %s [--deep] [--probe TYPE] [--events OUT.jsonl] [--entities OUT.jsonl] [--economy OUT.jsonl] <replay.dem>\n",
                      argv[0]);
         return 2;
     }
@@ -392,7 +439,8 @@ int main(int argc, char** argv) {
             std::printf("    %-24s %llu\n", dota::demo::cmd_name(cmd),
                         (unsigned long long)n);
         }
-        if (deep) deep_scan(reader, probe_type, 3, events_path, entities_path);
+        if (deep) deep_scan(reader, probe_type, 3, events_path, entities_path,
+                            economy_path);
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

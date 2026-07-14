@@ -51,6 +51,14 @@ func main() {
 	defer relay.Close()
 	go relay.Run(ctx)
 
+	jobStatus, err := events.NewJobStatusConsumer(pool, cfg.KafkaBrokers, logger)
+	if err != nil {
+		logger.Error("jobstatus_init_failed", "error", err)
+		os.Exit(1)
+	}
+	defer jobStatus.Close()
+	go jobStatus.Run(ctx)
+
 	h := &handlers.Handlers{DB: pool, Replays: replays}
 	srv := &http.Server{
 		Addr:    cfg.ListenAddr,

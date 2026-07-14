@@ -114,6 +114,7 @@ func (c *Consumer) handle(ctx context.Context, rec *kgo.Record) {
 			"match_id":      res.MatchID,
 			"event_rows":    res.EventRows,
 			"position_rows": res.PositionRows,
+			"economy_rows":  res.EconomyRows,
 			"duration_ms":   res.DurationMS,
 		})
 	if err != nil {
@@ -123,7 +124,7 @@ func (c *Consumer) handle(ctx context.Context, rec *kgo.Record) {
 	c.produce(ctx, c.topicOut, out)
 	c.log.Info("replay parsed", "job_id", msg.JobID, "match_id", res.MatchID,
 		"events", res.EventRows, "positions", res.PositionRows,
-		"duration_ms", res.DurationMS)
+		"economy", res.EconomyRows, "duration_ms", res.DurationMS)
 }
 
 func (c *Consumer) toDLQ(ctx context.Context, rec *kgo.Record, traceID, reason string) {

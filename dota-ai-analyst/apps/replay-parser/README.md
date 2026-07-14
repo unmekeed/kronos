@@ -105,12 +105,25 @@ ctest --test-dir build          # unit-тесты (varint, pb-поля, синт
 env-переменные (`KAFKA_BROKERS`, `S3_ENDPOINT`, `CLICKHOUSE_URL`,
 `DEMOINFO_PATH`, ...), см. `svc/internal/config`.
 
-## Дальше (спринт 8)
+## Состояние: EconomyTimeline и статусы задач ✅ (спринт 8)
 
-- EconomyTimeline: периодические сэмплы net worth/XP из
-  `CDOTA_DataRadiant/Dire` (ядро уже декодирует поля — добавить
-  выгрузку таймлайна в JSONL и загрузку в ClickHouse).
-- Обновление статуса AnalysisJob в PostgreSQL по `replay.parsed`
-  (сейчас статус остаётся `queued`; решить, кто владелец перехода —
-  gateway-консьюмер или parser-svc напрямую).
-- Feature Extractor (Гл. 6): фичи из ClickHouse по `replay.parsed`.
+- `demoinfo --economy OUT.jsonl` — сэмплы `DataTeamPlayer_t` каждые
+  300 тиков (net worth, total gold/XP, ласт-хиты, денаи по 10 слотам);
+  parser-svc грузит их в `EconomyTimeline` (player_id 0-4 Radiant,
+  5-9 Dire, сквозная нумерация как в `CDemoFileInfo`).
+- Gateway получил `JobStatusConsumer`: `replay.parsed` → `done`
+  (+ match_id, completed_at), `dlq.parser` → `failed`. Владелец
+  перехода — gateway (владеет таблицей AnalysisJobs); обновление
+  идемпотентно, безопасно при повторной доставке.
+
+Сквозной тест через живую инфраструктуру: HTTP-загрузка 110.6 МиБ →
+outbox → Kafka → парсер (56 252 события + 4 849 позиций + 4 490 строк
+экономики за ~7.5 с) → `replay.parsed` → статус job `done` виден через
+`GET /api/v1/jobs/{id}`. Путь ошибки проверен на битом событии: DLQ →
+`failed`.
+
+## Дальше (спринт 9)
+
+- Feature Extractor (Гл. 6): витрина фич из ClickHouse по
+  `replay.parsed` (голд-графики, контроль карты, тайминги предметов).
+- Датасет для обучения: выгрузка фич + исход матча (Гл. 7.2).

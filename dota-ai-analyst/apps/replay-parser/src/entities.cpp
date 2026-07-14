@@ -22,6 +22,8 @@ bool is_watched_field(const std::string& name) {
     return ends_with("m_cellX") || ends_with("m_cellY") ||
            ends_with("m_vecX") || ends_with("m_vecY") ||
            ends_with("m_iNetWorth") || ends_with("m_iTotalEarnedGold") ||
+           ends_with("m_iTotalEarnedXP") || ends_with("m_iLastHitCount") ||
+           ends_with("m_iDenyCount") ||
            ends_with("m_iCurrentLevel") || ends_with("m_iHealth");
 }
 
