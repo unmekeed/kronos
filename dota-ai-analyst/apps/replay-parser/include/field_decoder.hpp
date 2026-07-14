@@ -31,6 +31,8 @@ struct ResolvedField {
     int encode_flags = 0;
     bool coord = false;      // encoder "coord"
     bool simtime = false;    // simulation time (varint / 30)
+    bool runetime = false;   // encoder "runetime" (4 сырых бита)
+    bool qangle_precise = false;  // encoder "qangle_precise" (3 флага + 20 бит)
     std::string full_name;   // "CBodyComponent.m_cellX" (для watched-полей)
 };
 
@@ -49,8 +51,11 @@ class FieldResolver {
 
   private:
     const SendTables& st_;
-    // Кэш: (serializer, path key) → ResolvedField.
-    mutable std::unordered_map<uint64_t, ResolvedField> cache_;
+    // Кэш: serializer → (path key → ResolvedField). Двухуровневая карта —
+    // без ручной упаковки (ser_idx, path key) в один uint64_t: сериализаторов
+    // могут быть тысячи, а FieldPath::key() уже занимает почти все 64 бита
+    // для глубоких путей, из-за чего однобитовая упаковка даёт коллизии.
+    mutable std::unordered_map<size_t, std::unordered_map<uint64_t, ResolvedField>> cache_;
 };
 
 }  // namespace dota::demo

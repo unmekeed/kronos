@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <queue>
+#include <string>
 
 namespace dota::demo {
 
@@ -196,17 +198,17 @@ bool FieldPathDecoder::apply_op(int op, bits::BitReader& r, FieldPath& fp) const
                  return push(int32_t(r.read_bits(5))) &&
                         push(int32_t(r.read_bits(5))) &&
                         push(int32_t(r.read_bits(5)));
-        case 21: fp.path[fp.last] += int32_t(read_ubitvar_fp(r)) + 2;
+        case 21: fp.path[fp.last] += int32_t(r.read_ubitvar()) + 2;
                  return push(int32_t(read_ubitvar_fp(r))) &&
                         push(int32_t(read_ubitvar_fp(r)));
-        case 22: fp.path[fp.last] += int32_t(read_ubitvar_fp(r)) + 2;
+        case 22: fp.path[fp.last] += int32_t(r.read_ubitvar()) + 2;
                  return push(int32_t(r.read_bits(5))) &&
                         push(int32_t(r.read_bits(5)));
-        case 23: fp.path[fp.last] += int32_t(read_ubitvar_fp(r)) + 2;
+        case 23: fp.path[fp.last] += int32_t(r.read_ubitvar()) + 2;
                  return push(int32_t(read_ubitvar_fp(r))) &&
                         push(int32_t(read_ubitvar_fp(r))) &&
                         push(int32_t(read_ubitvar_fp(r)));
-        case 24: fp.path[fp.last] += int32_t(read_ubitvar_fp(r)) + 2;
+        case 24: fp.path[fp.last] += int32_t(r.read_ubitvar()) + 2;
                  return push(int32_t(r.read_bits(5))) &&
                         push(int32_t(r.read_bits(5))) &&
                         push(int32_t(r.read_bits(5)));
@@ -281,11 +283,26 @@ bool FieldPathDecoder::apply_op(int op, bits::BitReader& r, FieldPath& fp) const
     }
 }
 
+std::vector<std::string> FieldPathDecoder::debug_codes() const {
+    std::vector<std::string> codes(kNumOps);
+    std::function<void(int, std::string)> walk = [&](int node, std::string prefix) {
+        if (node < kNumOps) { codes[size_t(node)] = prefix; return; }
+        const Node& n = nodes_[size_t(node)];
+        walk(n.left, prefix + "0");
+        walk(n.right, prefix + "1");
+    };
+    walk(root_, "");
+    return codes;
+}
+
 bool FieldPathDecoder::read_paths(bits::BitReader& r,
                                   std::vector<FieldPath>& out) const {
     FieldPath fp;
     // Защита от desync: путей больше числа полей класса не бывает.
-    for (int guard = 0; guard < 4096; guard++) {
+    // CDOTA_DataRadiant/DataDire несут > 1200 полей (в т.ч. массивы
+    // видимости NPC по всем юнитам карты) — baseline легко превышает
+    // десятки тысяч field-path операций.
+    for (int guard = 0; guard < 200000; guard++) {
         int node = root_;
         while (node >= kNumOps) {
             const Node& n = nodes_[size_t(node)];

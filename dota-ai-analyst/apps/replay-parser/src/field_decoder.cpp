@@ -1,7 +1,10 @@
 #include "field_decoder.hpp"
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
 
 namespace dota::demo {
 
@@ -9,51 +12,154 @@ namespace {
 
 // -- Квантованный float (QuantizedFloatDecoder Source 2) ---------------------
 
-constexpr int kQFRoundDown = 1 << 0;
-constexpr int kQFRoundUp = 1 << 1;
-constexpr int kQFEncodeZero = 1 << 2;
-constexpr int kQFEncodeInt = 1 << 3;
+// Флаги интерпретируются как беззнаковые (см. manta quantizedfloat.go) —
+// схема иногда отдаёт encode_flags как отрицательное int32 (знаковое
+// расширение верхних бит), но действительные флаги всегда лежат в bit 0..3.
+constexpr uint32_t kQFRoundDown = 1u << 0;
+constexpr uint32_t kQFRoundUp = 1u << 1;
+constexpr uint32_t kQFEncodeZero = 1u << 2;
+constexpr uint32_t kQFEncodeInt = 1u << 3;
 
+// Точный порт dotabuff/manta quantizedfloat.go — расхождение в подсчёте
+// бит (bitcount при ENCODE_INT) ломает синхронизацию всего потока, а
+// расхождение в формуле значения (steps-1, не steps) даёт неверные числа
+// при формально верной синхронизации.
 struct QuantizedParams {
-    int bits = 0;
+    uint32_t bits = 0;
     float low = 0, high = 1;
-    int flags = 0;
-    float decode_mul = 0, decode_div = 0;  // производные
-    uint32_t steps = 0;
+    uint32_t flags = 0;
+    float offset = 0.0f;
+    float high_low_mul = 0.0f;
+    float dec_mul = 0.0f;
+    bool no_scale = false;
+
+    void validate_flags() {
+        if (flags == 0) return;
+        if ((low == 0.0f && (flags & kQFRoundDown)) ||
+            (high == 0.0f && (flags & kQFRoundUp))) {
+            flags &= ~kQFEncodeZero;
+        }
+        if (low == 0.0f && (flags & kQFEncodeZero)) {
+            flags |= kQFRoundDown;
+            flags &= ~kQFEncodeZero;
+        }
+        if (high == 0.0f && (flags & kQFEncodeZero)) {
+            flags |= kQFRoundUp;
+            flags &= ~kQFEncodeZero;
+        }
+        if (low > 0.0f || high < 0.0f) flags &= ~kQFEncodeZero;
+        if (flags & kQFEncodeInt) {
+            flags &= ~(kQFRoundUp | kQFRoundDown | kQFEncodeZero);
+        }
+    }
+
+    void assign_multipliers(uint32_t steps) {
+        float range = high - low;
+        uint32_t hi = (bits == 32) ? 0xFFFFFFFEu : ((1u << bits) - 1u);
+        float high_mul;
+        if (std::fabs(double(range)) <= 0.0) {
+            high_mul = float(hi);
+        } else {
+            high_mul = float(hi) / range;
+        }
+        if (double(high_mul) * double(range) > double(hi)) {
+            static constexpr float kAdj[] = {0.9999f, 0.99f, 0.9f, 0.8f, 0.7f};
+            for (float m : kAdj) {
+                high_mul = float(hi) / range * m;
+                if (double(high_mul) * double(range) <= double(hi)) break;
+            }
+        }
+        high_low_mul = high_mul;
+        dec_mul = 1.0f / float(steps > 0 ? steps - 1 : 1);
+    }
 
     void init() {
-        // Валидация/нормализация флагов как в движке.
-        int f = flags;
-        if (low == 0.0f && (f & kQFRoundDown)) f &= ~kQFRoundDown;
-        if (high == 0.0f && (f & kQFRoundUp)) f &= ~kQFRoundUp;
-        if (low > 0.0f || high < 0.0f) f &= ~kQFEncodeZero;
-        if ((f & kQFEncodeInt) &&
-            (low != std::floor(low) || high != std::floor(high) ||
-             high - low < 1.0f)) {
-            // ENCODE_INT неприменим — снимается движком; здесь упрощённо
-            f &= ~kQFEncodeInt;
+        if (bits == 0 || bits >= 32) {
+            no_scale = true;
+            bits = 32;
+            return;
         }
-        flags = f;
+        validate_flags();
 
-        steps = (1u << bits) - 1;
-        float range = high - low;
+        uint32_t steps = 1u << bits;
         if (flags & kQFRoundDown) {
-            float delta = range / float(steps + 1);
-            high -= delta * 0 + range / float(1u << bits);
+            float range = high - low;
+            offset = range / float(steps);
+            high -= offset;
         } else if (flags & kQFRoundUp) {
-            low += range / float(1u << bits);
+            float range = high - low;
+            offset = range / float(steps);
+            low += offset;
         }
-        range = high - low;
-        decode_mul = 1.0f / float(steps);
-        decode_div = range;
+
+        if (flags & kQFEncodeInt) {
+            float delta = high - low;
+            if (delta < 1.0f) delta = 1.0f;
+            double delta_log2 = std::ceil(std::log2(double(delta)));
+            uint32_t range2 = 1u << uint32_t(delta_log2);
+            uint32_t bc = bits;
+            while (!((1u << bc) > range2)) bc++;
+            if (bc > bits) {
+                bits = bc;
+                steps = 1u << bits;
+            }
+            offset = float(range2) / float(steps);
+        }
+
+        assign_multipliers(steps);
+
+        // Убрать ненужные флаги (manta: "Remove unessecary flags"). Если
+        // квантование границы уже само возвращает границу без специального
+        // «резервного» бита в потоке, movable — флаг был установлен только
+        // для КОНСТРУКЦИИ high/low (уже сделано выше) и не должен больше
+        // потреблять бит на decode(): иначе бит потока читается лишний раз
+        // и все последующие поля десинхронизируются на 1 бит.
+        if (flags & kQFRoundDown) {
+            if (quantize(low) == low) flags &= ~kQFRoundDown;
+        }
+        if (flags & kQFRoundUp) {
+            if (quantize(high) == high) flags &= ~kQFRoundUp;
+        }
+        if (flags & kQFEncodeZero) {
+            if (quantize(0.0f) == 0.0f) flags &= ~kQFEncodeZero;
+        }
+    }
+
+    // Точный порт quantize() из manta — используется только для проверки
+    // «нужен ли флаг» выше (не для собственно кодирования, которого мы не
+    // делаем); НЕ паникует на выходе за диапазон, а зажимает к границе,
+    // т.к. на этапе очистки флагов low/high всегда валидны по построению.
+    float quantize(float val) const {
+        if (val < low) return low;
+        if (val > high) return high;
+        uint32_t i = uint32_t((val - low) * high_low_mul);
+        return low + (high - low) * (float(i) * dec_mul);
     }
 
     float decode(bits::BitReader& r) const {
+        if (no_scale) {
+            uint32_t b = r.read_bits(32);
+            float v;
+            std::memcpy(&v, &b, sizeof v);
+            return v;
+        }
+        if (std::getenv("QF_DEBUG")) {
+            auto peek = r;
+            std::fprintf(stderr, "[qf] entering decode at bit %llu, next 16 raw bits: ",
+                        (unsigned long long)peek.pos_bits());
+            for (int i = 0; i < 16; i++) std::fprintf(stderr, "%u", peek.read_bits(1));
+            std::fprintf(stderr, " flags=%u bits=%u\n", flags, bits);
+        }
         if ((flags & kQFRoundDown) && r.read_bool()) return low;
         if ((flags & kQFRoundUp) && r.read_bool()) return high;
         if ((flags & kQFEncodeZero) && r.read_bool()) return 0.0f;
-        uint32_t u = r.read_bits(uint32_t(bits));
-        return low + float(u) * decode_mul * decode_div;
+        uint32_t u = r.read_bits(bits);
+        if (std::getenv("QF_DEBUG")) {
+            std::fprintf(stderr, "[qf] bits=%u u=%u low=%g high=%g dec_mul=%.8f flags=%u -> %g\n",
+                         bits, u, low, high, dec_mul, flags,
+                         low + (high - low) * float(u) * dec_mul);
+        }
+        return low + (high - low) * float(u) * dec_mul;
     }
 };
 
@@ -93,42 +199,7 @@ void read_normal_vector(bits::BitReader& r) {
 
 int64_t zigzag(uint64_t v) { return int64_t(v >> 1) ^ -int64_t(v & 1); }
 
-// -- Разбор строк типов -------------------------------------------------------
-
-struct ParsedType {
-    std::string base;       // тип без [] и generic-обёрток
-    std::string element;    // тип элемента массива/вектора
-    int fixed_array = 0;    // N для T[N]
-    bool utl_vector = false;
-    bool pointer = false;
-};
-
-ParsedType parse_var_type(const std::string& t) {
-    ParsedType p;
-    std::string s = t;
-    if (!s.empty() && s.back() == '*') {
-        p.pointer = true;
-        s.pop_back();
-    }
-    auto lb = s.find('[');
-    if (lb != std::string::npos) {
-        p.fixed_array = std::atoi(s.substr(lb + 1).c_str());
-        s = s.substr(0, lb);
-    }
-    for (const char* vec : {"CUtlVector< ", "CNetworkUtlVectorBase< ",
-                            "CUtlVectorEmbeddedNetworkVar< "}) {
-        if (s.rfind(vec, 0) == 0) {
-            p.utl_vector = true;
-            s = s.substr(std::strlen(vec));
-            auto gt = s.rfind(" >");
-            if (gt != std::string::npos) s = s.substr(0, gt);
-            break;
-        }
-    }
-    p.base = s;
-    p.element = s;
-    return p;
-}
+// -- Определение типа значения по базовому имени -----------------------------
 
 ResolvedField::Kind base_kind(const std::string& b) {
     using K = ResolvedField::Kind;
@@ -140,12 +211,13 @@ ResolvedField::Kind base_kind(const std::string& b) {
         b.rfind("CStrongHandle<", 0) == 0 || b == "item_definition_index_t" ||
         b == "itemid_t" || b == "style_index_t" || b == "CEntityIndex")
         return K::VarUint;
-    if (b == "int8" || b == "int16" || b == "int32" || b == "int64")
+    if (b == "int8" || b == "int16" || b == "int32" || b == "int64" ||
+        b == "HeroID_t")
         return K::VarSint;
     if (b == "float32" || b == "CNetworkedQuantizedFloat" || b == "GameTime_t" ||
         b == "float")
         return K::Float;
-    if (b == "Vector") return K::Vector3;
+    if (b == "Vector" || b == "VectorWS") return K::Vector3;
     if (b == "Vector2D") return K::Vector2;
     if (b == "Vector4D" || b == "Quaternion") return K::Vector4;
     if (b == "QAngle") return K::QAngle;
@@ -164,6 +236,12 @@ bool decode_value(bits::BitReader& r, const ResolvedField& f, FieldValue& out) {
     auto read_float_one = [&]() -> float {
         if (f.coord) return read_coord(r);
         if (f.simtime) return float(r.read_varuint32()) * (1.0f / 30.0f);
+        if (f.runetime) {  // manta runeTimeDecoder: 4 сырых бита как float-биты
+            uint32_t b = r.read_bits(4);
+            float v;
+            std::memcpy(&v, &b, sizeof v);
+            return v;
+        }
         if (f.bit_count <= 0 || f.bit_count >= 32) return read_noscale_float(r);
         QuantizedParams q;
         q.bits = f.bit_count;
@@ -204,7 +282,12 @@ bool decode_value(bits::BitReader& r, const ResolvedField& f, FieldValue& out) {
             break;
         }
         case K::QAngle: {
-            if (f.bit_count != 0) {
+            if (f.qangle_precise) {
+                bool hx = r.read_bool(), hy = r.read_bool(), hz = r.read_bool();
+                if (hx) r.read_bits(20);
+                if (hy) r.read_bits(20);
+                if (hz) r.read_bits(20);
+            } else if (f.bit_count != 0) {
                 r.read_bits(uint32_t(f.bit_count));
                 r.read_bits(uint32_t(f.bit_count));
                 r.read_bits(uint32_t(f.bit_count));
@@ -235,111 +318,171 @@ bool decode_value(bits::BitReader& r, const ResolvedField& f, FieldValue& out) {
     return !r.overflowed();
 }
 
+namespace {
+
+// Заполнить параметры декодирования из СОБСТВЕННЫХ атрибутов поля
+// (bit_count/low/high/encoder) — применимо к Simple и к элементам
+// FixedArray; НЕ применимо к элементам VariableArray (Гл. 5.1 — там
+// используется декодер по умолчанию для базового типа, без квантования).
+void apply_field_context(const SerializerField& f, ResolvedField& rf) {
+    using K = ResolvedField::Kind;
+    rf.bit_count = f.bit_count;
+    rf.low = f.low_value;
+    rf.high = f.high_value;
+    rf.encode_flags = f.encode_flags;
+
+    const std::string& bt = f.element_type;
+
+    // Приоритет декодера в manta (findDecoder): fieldTypeFactories по базовому
+    // типу проверяется РАНЬШЕ fieldTypeDecoders. Фабрики есть у float32
+    // (floatFactory: encoder coord/simtime/runetime, иначе noscale/quantized
+    // по bit_count), у CNetworkedQuantizedFloat (ВСЕГДА quantized, энкодер
+    // игнорируется) и у векторов Vector/VectorWS/Vector2D/Vector4D/Quaternion
+    // (vectorFactory: каждая компонента через floatFactory, т.е. энкодер
+    // уважается покомпонентно). Типы из fieldTypeDecoders энкодер и параметры
+    // квантования игнорируют всегда: GameTime_t — безусловно noscale.
+    if (rf.kind == K::Vector3 && f.encoder == "normal") {
+        rf.kind = K::NormalVec;  // vectorFactory: 3-вектор с encoder="normal"
+        return;
+    }
+    if (bt == "GameTime_t") {
+        rf.bit_count = 0;  // noscaleDecoder независимо от bit_count схемы
+        return;
+    }
+    if (bt == "CNetworkedQuantizedFloat") return;
+
+    bool float_like = bt == "float32" || rf.kind == K::Vector2 ||
+                      rf.kind == K::Vector3 || rf.kind == K::Vector4;
+    if (float_like) {
+        rf.coord = f.encoder == "coord";
+        // Патч схемы (manta field_patch.go, применяется для всех билдов):
+        // поля с этими именами принудительно получают encoder="simtime".
+        rf.simtime = f.encoder == "simtime" ||
+                     f.var_name == "m_flSimulationTime" ||
+                     f.var_name == "m_flAnimTime";
+        // runetime-патч только при сентинельных границах ±FLT_MAX (иначе
+        // поле кодируется обычным квантованным float).
+        rf.runetime = f.encoder == "runetime" ||
+                      (f.var_name == "m_flRuneTime" &&
+                       f.low_value == -std::numeric_limits<float>::max() &&
+                       f.high_value == std::numeric_limits<float>::max());
+    }
+    if (f.encoder == "fixed64" && rf.kind == K::VarUint) {
+        rf.kind = K::Fixed64;
+    }
+    if (rf.kind == K::QAngle) {
+        if (f.encoder == "qangle_pitch_yaw") {
+            rf.kind = K::Vector2;  // pitch+yaw (bit_count бит или noscale), roll нет
+        } else if (f.encoder == "qangle_precise") {
+            rf.qangle_precise = true;  // 3 флага + по 20 бит на компоненту
+        }
+    }
+}
+
+bool resolve_in_serializer(const SendTables& st, size_t ser_idx,
+                           const FieldPath& fp, int32_t pos, std::string& name,
+                           ResolvedField& out);
+
+// pos — индекс СЛЕДУЮЩЕЙ непотреблённой компоненты пути (после того как
+// поле f уже было выбрано компонентой fp.path[pos-1] родительским
+// сериализатором). Модель обхода портирована из dotabuff/manta field.go
+// (getFieldForFieldPath/getDecoderForFieldPath) — см. Гл. 5.1.
+bool resolve_field(const SendTables& st, const SerializerField& f,
+                   const FieldPath& fp, int32_t pos, std::string& name,
+                   ResolvedField& out) {
+    using K = ResolvedField::Kind;
+    switch (f.model) {
+        case FieldModel::Simple:
+            out.kind = base_kind(f.element_type);
+            apply_field_context(f, out);
+            return true;
+
+        case FieldModel::FixedArray:
+            // Валидные компоненты кодируют индекс элемента, но декодер один
+            // и тот же независимо от глубины остатка пути (manta: getDecoder
+            // всегда возвращает f.decoder для FixedArray).
+            if (fp.last >= pos) {
+                name += '.';
+                name += std::to_string(fp.path[size_t(pos)]);
+            }
+            out.kind = base_kind(f.element_type);
+            apply_field_context(f, out);
+            return true;
+
+        case FieldModel::VariableArray:
+            if (fp.last < pos) {
+                out.kind = K::ArrayCount;  // изменение длины массива
+                return true;
+            }
+            if (fp.last == pos) {
+                // Элемент массива скаляров: декодер по умолчанию для
+                // базового типа БЕЗ параметров квантования поля-массива.
+                name += '.';
+                name += std::to_string(fp.path[size_t(pos)]);
+                out.kind = base_kind(f.element_type);
+                return true;
+            }
+            return false;  // глубже некуда — массив скаляров, не структур
+
+        case FieldModel::FixedTable:
+            if (fp.last < pos) {
+                out.kind = K::PointerMarker;  // создание/удаление указателя
+                return true;
+            }
+            if (f.field_serializer < 0) return false;
+            // Не массив — то же pos продолжает выбор поля во вложенном
+            // сериализаторе (без отдельного индекса элемента).
+            return resolve_in_serializer(st, size_t(f.field_serializer), fp,
+                                         pos, name, out);
+
+        case FieldModel::VariableTable:
+            if (fp.last <= pos) {
+                out.kind = K::ArrayCount;  // изменение длины массива структур
+                return true;
+            }
+            if (f.field_serializer < 0) return false;
+            name += '.';
+            name += std::to_string(fp.path[size_t(pos)]);
+            return resolve_in_serializer(st, size_t(f.field_serializer), fp,
+                                         pos + 1, name, out);
+    }
+    return false;
+}
+
+bool resolve_in_serializer(const SendTables& st, size_t ser_idx,
+                           const FieldPath& fp, int32_t pos, std::string& name,
+                           ResolvedField& out) {
+    if (ser_idx >= st.serializers.size()) return false;
+    const auto& ser = st.serializers[ser_idx];
+    if (pos < 0 || pos > fp.last) return false;
+    int32_t comp = fp.path[size_t(pos)];
+    if (comp < 0 || size_t(comp) >= ser.field_indexes.size()) return false;
+    const auto& f = st.fields[size_t(ser.field_indexes[size_t(comp)])];
+    if (!name.empty()) name += '.';
+    name += f.var_name;
+    return resolve_field(st, f, fp, pos + 1, name, out);
+}
+
+}  // namespace
+
 bool FieldResolver::resolve(size_t ser_idx, const FieldPath& fp,
                             ResolvedField& out) const {
-    uint64_t key = (uint64_t(ser_idx) << 56) ^ fp.key();
-    auto it = cache_.find(key);
-    if (it != cache_.end()) {
+    uint64_t key = fp.key();
+    auto& ser_cache = cache_[ser_idx];
+    auto it = ser_cache.find(key);
+    if (it != ser_cache.end()) {
         out = it->second;
         return out.kind != ResolvedField::Kind::Unknown;
     }
 
     ResolvedField rf;
-    size_t cur_ser = ser_idx;
     std::string name;
-    int32_t depth = 0;
-    const SerializerField* fld = nullptr;
-    bool in_array_elem = false;
-    ParsedType pt;
-
-    while (depth <= fp.last) {
-        int32_t comp = fp.path[size_t(depth)];
-        if (!in_array_elem) {
-            if (cur_ser >= st_.serializers.size()) { rf.kind = ResolvedField::Kind::Unknown; break; }
-            const auto& ser = st_.serializers[cur_ser];
-            if (comp < 0 || size_t(comp) >= ser.field_indexes.size()) {
-                rf.kind = ResolvedField::Kind::Unknown; break;
-            }
-            fld = &st_.fields[size_t(ser.field_indexes[size_t(comp)])];
-            if (!name.empty()) name += '.';
-            name += fld->var_name;
-            pt = parse_var_type(fld->var_type);
-            depth++;
-
-            bool is_array = pt.fixed_array > 0 || pt.utl_vector;
-            if (depth <= fp.last) {
-                if (is_array) { in_array_elem = true; continue; }
-                if (fld->field_serializer >= 0) {
-                    cur_ser = size_t(fld->field_serializer);
-                    continue;
-                }
-                rf.kind = ResolvedField::Kind::Unknown;  // путь глубже скаляра
-                break;
-            }
-            // Путь закончился на самом поле.
-            if (pt.utl_vector) { rf.kind = ResolvedField::Kind::ArrayCount; break; }
-            if (pt.fixed_array > 0 && pt.base != "char") {
-                rf.kind = ResolvedField::Kind::ArrayCount; break;
-            }
-            if (fld->field_serializer >= 0 || pt.pointer) {
-                rf.kind = ResolvedField::Kind::PointerMarker; break;
-            }
-            rf.kind = base_kind(pt.base);
-            break;
-        } else {
-            // Компонент — индекс элемента массива.
-            name += '.';
-            name += std::to_string(comp);
-            depth++;
-            in_array_elem = false;
-            if (depth <= fp.last) {
-                if (fld && fld->field_serializer >= 0) {
-                    cur_ser = size_t(fld->field_serializer);
-                    continue;
-                }
-                rf.kind = ResolvedField::Kind::Unknown;
-                break;
-            }
-            // Элемент массива — конец пути.
-            if (fld && fld->field_serializer >= 0) {
-                rf.kind = ResolvedField::Kind::PointerMarker;
-            } else {
-                rf.kind = base_kind(pt.element);
-            }
-            break;
-        }
-    }
-
-    if (fld && rf.kind != ResolvedField::Kind::Unknown) {
-        rf.bit_count = fld->bit_count;
-        rf.low = fld->low_value;
-        rf.high = fld->high_value;
-        rf.encode_flags = fld->encode_flags;
-        rf.coord = fld->encoder == "coord";
-        rf.simtime = fld->encoder == "simulationtime" ||
-                     fld->var_type == "GameTime_t" ||
-                     // Патч схемы: поля времени симуляции кодируются varint
-                     // (tick/30), несмотря на заявленный float32.
-                     fld->var_name == "m_flSimulationTime" ||
-                     fld->var_name == "m_flAnimTime";
-        if (fld->encoder == "normal" &&
-            rf.kind == ResolvedField::Kind::Vector3) {
-            rf.kind = ResolvedField::Kind::NormalVec;
-        }
-        if (fld->encoder == "fixed64" &&
-            rf.kind == ResolvedField::Kind::VarUint) {
-            rf.kind = ResolvedField::Kind::Fixed64;
-        }
-        if (fld->encoder == "qangle_pitch_yaw" &&
-            rf.kind == ResolvedField::Kind::QAngle) {
-            // pitch+yaw по bit_count, roll отсутствует
-            rf.kind = ResolvedField::Kind::Vector2;  // 2 квантованных
-        }
-    }
+    bool ok = resolve_in_serializer(st_, ser_idx, fp, 0, name, rf);
+    rf.kind = ok ? rf.kind : ResolvedField::Kind::Unknown;
     rf.full_name = std::move(name);
-    cache_[key] = rf;
-    out = cache_[key];
-    return out.kind != ResolvedField::Kind::Unknown;
+    ser_cache[key] = rf;
+    out = rf;
+    return ok;
 }
 
 }  // namespace dota::demo

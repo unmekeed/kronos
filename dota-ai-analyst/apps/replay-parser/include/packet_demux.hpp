@@ -40,6 +40,18 @@ struct ClassInfo {
 };
 ClassInfo parse_class_info(std::string_view payload);
 
+// Модель обхода поля при разрешении field path (портировано из dotabuff/manta,
+// sendtable.go: onCDemoSendTables). Определяется НЕ регэкспом по строке типа,
+// а точным правилом Valve: наличие вложенного сериализатора имеет приоритет
+// над видом типа.
+enum class FieldModel {
+    Simple,          // скаляр — decode напрямую
+    FixedArray,      // T[N] или T[MACRO] — статический массив скаляров
+    FixedTable,      // указатель на структуру (CBodyComponent и т.п.) — не массив
+    VariableArray,   // CUtlVector<T>/CNetworkUtlVectorBase<T> — массив скаляров
+    VariableTable,   // вложенный сериализатор, НЕ являющийся pointer-type — массив структур
+};
+
 // Поле сериализатора (ProtoFlattenedSerializerField_t, разрешённые символы).
 struct SerializerField {
     std::string var_name;
@@ -51,6 +63,10 @@ struct SerializerField {
     float high_value = 0.0f;
     int32_t encode_flags = 0;
     int32_t field_serializer = -1;  // индекс вложенного сериализатора, -1 = нет
+
+    // Вычисляются один раз после парсинга схемы (compute_field_models).
+    FieldModel model = FieldModel::Simple;
+    std::string element_type;   // тип элемента для FixedArray/VariableArray
 };
 
 // Сериализатор класса (ProtoFlattenedSerializer_t).

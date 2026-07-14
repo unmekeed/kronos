@@ -81,7 +81,16 @@ bool Entities::decode_entity_fields(const FieldPathDecoder& fpd,
             return false;  // путь не существует в схеме → desync
         }
         static const char* dbg2 = std::getenv("ENT_DEBUG");
+        static const char* raw_peek = std::getenv("RAW_PEEK");
         uint64_t bit_before = r.pos_bits();
+        if (raw_peek && rf.full_name == raw_peek) {
+            auto peek = r;
+            std::fprintf(stderr, "[raw] %s bit_count=%d low=%g high=%g flags=%d @%llu: ",
+                        rf.full_name.c_str(), rf.bit_count, rf.low, rf.high, rf.encode_flags,
+                        (unsigned long long)bit_before);
+            for (int i = 0; i < 24; i++) std::fprintf(stderr, "%u", peek.read_bits(1));
+            std::fprintf(stderr, "\n");
+        }
         FieldValue v;
         if (!decode_value(r, rf, v)) {
             if (dbg) std::fprintf(stderr, "    [dbg] decode_value failed %s.%s kind=%d\n",
@@ -137,12 +146,18 @@ bool Entities::decode_with(const FieldPathDecoder& fpd,
     bits::BitReader r(entity_data);
     int32_t index = -1;
 
+    static const bool dbg = std::getenv("ENT_DEBUG") != nullptr;
     for (int32_t i = 0; i < updated; i++) {
         index += int32_t(r.read_ubitvar()) + 1;
         uint32_t cmd = r.read_bits(2);
-        if (r.overflowed()) return false;
-        static const bool dbg = std::getenv("ENT_DEBUG") != nullptr;
-        if (dbg) std::fprintf(stderr, "  [dbg] ent %d/%d idx=%d cmd=%u\n", i, updated, index, cmd);
+        if (r.overflowed()) {
+            if (dbg) std::fprintf(stderr,
+                "  [dbg] header overflow at ent %d/%d (remaining_before was near 0)\n",
+                i, updated);
+            return false;
+        }
+        if (dbg) std::fprintf(stderr, "  [dbg] ent %d/%d idx=%d cmd=%u remaining=%llu\n",
+                              i, updated, index, cmd, (unsigned long long)r.remaining_bits());
 
         if ((cmd & 0x01) == 0) {
             if (cmd & 0x02) {  // create
@@ -161,7 +176,11 @@ bool Entities::decode_with(const FieldPathDecoder& fpd,
                     return false;
                 }
                 auto sit = st_.by_name.find(cit->second);
-                if (sit == st_.by_name.end()) return false;
+                if (sit == st_.by_name.end()) {
+                    if (dbg) std::fprintf(stderr, "    [dbg] no serializer for class %s\n",
+                                          cit->second.c_str());
+                    return false;
+                }
 
                 Entity e;
                 e.index = index;
@@ -179,12 +198,21 @@ bool Entities::decode_with(const FieldPathDecoder& fpd,
                     }
                 }
                 if (!apply_baseline(fpd, e, strict)) return false;
+                if (dbg) std::fprintf(stderr, "    [live delta begin @%llu]\n",
+                                      (unsigned long long)r.pos_bits());
                 if (!decode_entity_fields(fpd, r, e, strict)) return false;
+                if (dbg) std::fprintf(stderr, "    [live delta end @%llu]\n",
+                                      (unsigned long long)r.pos_bits());
                 entities_[index] = std::move(e);
                 creates_++;
             } else {  // delta-update
                 auto it = entities_.find(index);
-                if (it == entities_.end()) return false;
+                if (it == entities_.end()) {
+                    if (dbg) std::fprintf(stderr, "    [dbg] delta-update unknown idx=%d\n", index);
+                    return false;
+                }
+                if (dbg) std::fprintf(stderr, "    [dbg] update %s idx=%d\n",
+                                      it->second.class_name.c_str(), index);
                 if (!decode_entity_fields(fpd, r, it->second, strict))
                     return false;
                 it->second.active = true;
@@ -199,6 +227,11 @@ bool Entities::decode_with(const FieldPathDecoder& fpd,
         }
     }
     // Хвост — только паддинг.
+    static const bool dbg_final = std::getenv("ENT_DEBUG") != nullptr;
+    if (dbg_final) {
+        std::fprintf(stderr, "  [dbg] decode_with done: overflow=%d remaining=%llu updated=%d\n",
+                     r.overflowed(), (unsigned long long)r.remaining_bits(), updated);
+    }
     return !r.overflowed() && r.remaining_bits() < 8;
 }
 

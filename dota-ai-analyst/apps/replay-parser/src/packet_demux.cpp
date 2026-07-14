@@ -1,6 +1,8 @@
 #include "packet_demux.hpp"
 
+#include <cstdlib>
 #include <cstring>
+#include <set>
 #include <stdexcept>
 
 #include "bit_reader.hpp"
@@ -122,6 +124,86 @@ float bits_to_float(uint64_t v) {
 
 std::string sym(const std::vector<std::string>& symbols, uint64_t idx) {
     return idx < symbols.size() ? symbols[idx] : std::string();
+}
+
+// -- Определение модели поля (dotabuff/manta, sendtable.go) ------------------
+
+// Типы, трактуемые как "указатель на структуру" даже без явного '*' в имени
+// типа — портировано дословно из manta's pointerTypes.
+const std::set<std::string>& pointer_types() {
+    static const std::set<std::string> kSet = {
+        "PhysicsRagdollPose_t", "CBodyComponent", "CEntityIdentity",
+        "CPhysicsComponent", "CRenderComponent", "CDOTAGamerules",
+        "CDOTAGameManager", "CDOTASpectatorGraphManager", "CPlayerLocalData",
+        "CPlayer_CameraServices", "CDOTAGameRules",
+    };
+    return kSet;
+}
+
+// Разбор строки типа Source 2: базовый тип, generic-параметр (<...>),
+// признак массива ([N] или [MACRO_NAME]), признак указателя (trailing '*').
+struct ParsedType {
+    std::string base;      // тип без generic/array/pointer обёрток
+    std::string element;   // generic-параметр (для CUtlVector<T> — T)
+    int array_flag = 0;    // >0, если было [N] или [MACRO] (точное N не важно)
+    bool pointer = false;
+};
+
+ParsedType parse_var_type(const std::string& type) {
+    ParsedType p;
+    std::string s = type;
+    if (!s.empty() && s.back() == '*') {
+        p.pointer = true;
+        s.pop_back();
+    }
+    auto lb = s.find('[');
+    if (lb != std::string::npos) {
+        std::string inside = s.substr(lb + 1);
+        if (!inside.empty() && inside.back() == ']') inside.pop_back();
+        int n = std::atoi(inside.c_str());
+        p.array_flag = n > 0 ? n : (inside.empty() ? 0 : 1);
+        s = s.substr(0, lb);
+    }
+    auto lt = s.find('<');
+    if (lt != std::string::npos) {
+        auto gt = s.rfind('>');
+        if (gt != std::string::npos && gt > lt) {
+            std::string inner = s.substr(lt + 1, gt - lt - 1);
+            size_t b = inner.find_first_not_of(' ');
+            size_t e = inner.find_last_not_of(' ');
+            p.element = (b == std::string::npos) ? ""
+                                                  : inner.substr(b, e - b + 1);
+        }
+        s = s.substr(0, lt);
+        while (!s.empty() && s.back() == ' ') s.pop_back();
+    }
+    p.base = s;
+    return p;
+}
+
+// Присвоить каждому полю модель обхода — портировано дословно из
+// onCDemoSendTables (порядок проверок критичен: наличие field_serializer
+// проверяется РАНЬШЕ вида типа).
+void compute_field_models(SendTables& st) {
+    for (auto& f : st.fields) {
+        ParsedType pt = parse_var_type(f.var_type);
+        if (f.field_serializer >= 0) {
+            bool is_pointer_like = pt.pointer || pointer_types().count(pt.base) > 0;
+            f.model = is_pointer_like ? FieldModel::FixedTable
+                                      : FieldModel::VariableTable;
+        } else if (pt.array_flag > 0 && pt.base != "char") {
+            f.model = FieldModel::FixedArray;
+            f.element_type = pt.base;
+        } else if (pt.base == "CUtlVector" || pt.base == "CNetworkUtlVectorBase") {
+            f.model = FieldModel::VariableArray;
+            f.element_type = pt.element;
+        } else {
+            f.model = FieldModel::Simple;
+            // Очищенный базовый тип (без [N]/generic-обёрток) — например
+            // "char[128]" -> "char" — для корректного выбора decode_value.
+            f.element_type = pt.base;
+        }
+    }
 }
 
 }  // namespace
@@ -251,6 +333,8 @@ SendTables parse_send_tables(std::string_view payload) {
             st.fields[i].field_serializer = int32_t(it->second);
         }
     }
+
+    compute_field_models(st);
     return st;
 }
 

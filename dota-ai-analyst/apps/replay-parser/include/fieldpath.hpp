@@ -48,6 +48,9 @@ class FieldPathDecoder {
     // Прочитать все пути до FieldPathEncodeFinish; false при desync/overflow.
     bool read_paths(bits::BitReader& r, std::vector<FieldPath>& out) const;
 
+    // Отладка: код каждого op'а как строка "0"/"1" (см. ENT_DEBUG tooling).
+    std::vector<std::string> debug_codes() const;
+
     static constexpr int kNumOps = 40;
 
   private:

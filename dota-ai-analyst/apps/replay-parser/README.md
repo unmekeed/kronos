@@ -45,31 +45,41 @@ ctest --test-dir build          # unit-тесты (varint, pb-поля, синт
 19 string tables (`CombatLogNames`, `instancebaseline`, `EntityNames`, ...);
 сериализатор `CDOTA_Unit_Hero_Puck` содержит 183 поля.
 
-## Состояние: string tables, combat log ✅; декодер сущностей 🔴 WIP (спринт 6, часть 2/3)
+## Состояние: string tables, combat log, декодер сущностей ✅ (спринт 6, части 2/3)
 
 - **string_tables** — декодер `svc_Create/UpdateStringTable` (история ключей,
   user data, snappy); `CombatLogNames` разрешает 544 имени на реальном реплее.
 - **combat_log** — `CMsgDOTACombatLogEntry` (msg id 554) с резолвом имён;
   на реплее 8892914077: 131 818 записей, 65 убийств героев с инфликторами.
   `demoinfo --events OUT.jsonl` пишет поток под схему `ReplayEvents`.
-- **entities/fieldpath/field_decoder — НЕ РАБОТАЕТ, в разработке.**
-  Реализованы: BitReader-совместимый декодер 40 field-path операций
-  (huffman-дерево, портирован алгоритм построения кучи из `dotabuff/manta`
-  для битовой совместимости с сетевым форматом), типовые декодеры полей
-  (quantized float, coord, векторы, строки, handle/enum), резолвер путей по
-  `SendTables` с учётом версий сериализаторов, машина состояний сущностей
-  (create/update/delete, instancebaseline). На реальном реплее декодер
-  **всё ещё расходится с потоком** (`DESYNC`, 0 обработанных пакетов) —
-  последняя находка (аргумент `ubitvar` в операциях 21–24 использует базовый,
-  а не FP-вариант кодирования) исправлена, но не проверена до конца.
-  Инструмент отладки: `ENT_DEBUG=1|2|3 ./build/demoinfo --entities out.jsonl replay.dem`
-  (уровни: команды сущностей / значения полей / операции field path).
+- **entities/fieldpath/field_decoder** — полный декодер сущностей
+  `svc_PacketEntities`, битово-совместимый с эталоном `dotabuff/manta`:
+  - 40 field-path операций (huffman-дерево с точной семантикой
+    `container/heap` Go — порядок при равных весах критичен);
+  - модель полей Simple/FixedArray/FixedTable/VariableArray/VariableTable
+    (классификация по `field_serializer` + набору pointer-типов, как в manta)
+    и рекурсивный резолвер путей по `SendTables`;
+  - типовые декодеры: quantized float (точный порт `quantizedfloat.go`,
+    включая шаг снятия лишних флагов ROUNDDOWN/ROUNDUP/ENCODE_ZERO — без него
+    поток теряет 1 бит на границах диапазона), coord/simtime/runetime,
+    векторы (`Vector*`/`VectorWS`/`Quaternion` — покомпонентный floatFactory),
+    `GameTime_t` → безусловный noscale, QAngle (включая `qangle_pitch_yaw`,
+    `qangle_precise`), строки, handle/enum;
+  - машина состояний create/update/delete/leave-PVS с применением
+    `instancebaseline`.
+  Инструменты отладки: `ENT_DEBUG=1|2|3` (команды сущностей / значения полей /
+  операции field path), `RAW_PEEK=<полное.имя.поля>` (сырые биты потока),
+  `QF_DEBUG=1` (параметры квантованного float).
 
-## Дальше (спринт 6, часть 3 — доделать)
+Замер на реплее 8892914077: **все 67 450 пакетов** декодированы без потери
+синхронизации за ~3.8 с; 23 132 создания сущностей, 7.59 млн обновлений,
+2 155 живых сущностей в конце. `demoinfo --entities OUT.jsonl` пишет позиции
+героев (`m_cellX/Y` + `m_vecX/Y` → мировые координаты, 4 849 сэмплов каждые
+300 тиков), в сводке — итоговый net worth всех 10 слотов из
+`CDOTA_DataRadiant`/`CDOTA_DataDire` (значения сверены с эталоном manta).
 
-- Найти оставшуюся причину desync в декодере сущностей (вероятные места:
-  семантика `PushN`/`PopN`-групп операций, разбор вложенных сериализаторов
-  для массивов структур, кодировка `CUtlVector`).
-- После чистого декода: извлечь позиции (`m_cellX/m_cellY/m_vecOrigin`) и
-  экономику героев (`m_iNetWorth`, `m_iTotalEarnedGold`) в JSONL/ClickHouse.
+## Дальше (спринт 7)
+
 - Go-обвязка: Kafka-консьюмер `match.downloaded` → ядро → `replay.parsed`.
+- ETL: `positions/events JSONL` → ClickHouse (`PositionSnapshots`,
+  `ReplayEvents`, `EconomyTimeline`).

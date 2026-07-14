@@ -11,6 +11,7 @@
 #include <string>
 
 #include "combat_log.hpp"
+#include "fieldpath.hpp"
 #include "entities.hpp"
 #include "demo_reader.hpp"
 #include "packet_demux.hpp"
@@ -182,6 +183,56 @@ static void deep_scan(DemoReader& reader, uint32_t probe_type, int probe_limit,
             std::printf("    [%d] %s\n", idx, e.key.c_str());
         }
     }
+    if (std::getenv("DUMP_HUFFMAN")) {
+        demo::FieldPathDecoder fpd({true, true, true});
+        auto codes = fpd.debug_codes();
+        for (size_t i = 0; i < codes.size(); i++)
+            std::printf("%zu\t%s\n", i, codes[i].c_str());
+    }
+    if (const char* dsn = std::getenv("DUMP_SER_NAME")) {
+        std::printf("== All serializers named %s ==\n", dsn);
+        for (size_t i = 0; i < send_tables.serializers.size(); i++) {
+            const auto& s = send_tables.serializers[i];
+            if (s.name == dsn) {
+                std::printf("  #%zu v%d (%zu fields)\n", i, s.version, s.field_indexes.size());
+            }
+        }
+    }
+    if (const char* ds = std::getenv("DUMP_SER")) {
+        size_t idx = size_t(std::atoi(ds));
+        if (idx < send_tables.serializers.size()) {
+            const auto& s = send_tables.serializers[idx];
+            std::printf("== Dump serializer #%zu: %s (v%d, %zu fields) ==\n",
+                        idx, s.name.c_str(), s.version, s.field_indexes.size());
+            for (size_t i = 0; i < s.field_indexes.size(); i++) {
+                const auto& f = send_tables.fields[size_t(s.field_indexes[i])];
+                std::printf("  [%zu] %-30s type=%-30s ser=%d enc=%s bc=%d\n",
+                            i, f.var_name.c_str(), f.var_type.c_str(),
+                            f.field_serializer, f.encoder.c_str(), f.bit_count);
+            }
+        } else {
+            std::printf("serializer #%zu out of range (%zu total)\n", idx,
+                        send_tables.serializers.size());
+        }
+    }
+    // Отладочный дамп схемы конкретного класса: DUMP_CLASS=CWorld
+    if (const char* dc = std::getenv("DUMP_CLASS")) {
+        auto it = send_tables.by_name.find(dc);
+        if (it != send_tables.by_name.end()) {
+            const auto& s = send_tables.serializers[it->second];
+            std::printf("== Dump class %s (v%d, %zu fields) ==\n",
+                        s.name.c_str(), s.version, s.field_indexes.size());
+            for (size_t i = 0; i < s.field_indexes.size(); i++) {
+                const auto& f = send_tables.fields[size_t(s.field_indexes[i])];
+                std::printf("  [%zu] %-30s type=%-30s ser=%d enc=%s bc=%d model=%d elem=%s low=%g high=%g flags=%d\n",
+                            i, f.var_name.c_str(), f.var_type.c_str(),
+                            f.field_serializer, f.encoder.c_str(), f.bit_count,
+                            int(f.model), f.element_type.c_str(), f.low_value, f.high_value, f.encode_flags);
+            }
+        } else {
+            std::printf("class %s not found\n", dc);
+        }
+    }
     if (const auto* bl = tables.by_name("instancebaseline")) {
         std::printf("  instancebaseline: %zu entries (baseline bitstreams)\n",
                     bl->entries.size());
@@ -240,6 +291,28 @@ static void deep_scan(DemoReader& reader, uint32_t probe_type, int probe_limit,
                         e.class_name.c_str(), e.index, ok ? x : 0.f,
                         ok ? y : 0.f, ok ? "" : " [no pos]");
         });
+        std::printf("  net worth (final, per slot) :\n");
+        for (const auto& [idx, e] : entities->all()) {
+            if (e.class_name != "CDOTA_DataRadiant" &&
+                e.class_name != "CDOTA_DataDire")
+                continue;
+            std::printf("    %s:", e.class_name.c_str());
+            // m_vecDataTeam.NNNN.m_iNetWorth — по 5 слотов на команду.
+            for (int slot = 0; slot < 5; slot++) {
+                char key[64];
+                std::snprintf(key, sizeof key, "m_vecDataTeam.%d.m_iNetWorth",
+                              slot);
+                auto it = e.watched.find(key);
+                if (it == e.watched.end()) { std::printf(" -"); continue; }
+                if (auto* u = std::get_if<uint64_t>(&it->second))
+                    std::printf(" %llu", (unsigned long long)*u);
+                else if (auto* s = std::get_if<int64_t>(&it->second))
+                    std::printf(" %lld", (long long)*s);
+                else
+                    std::printf(" ?");
+            }
+            std::printf("\n");
+        }
     }
     if (entities_out) {
         std::fclose(entities_out);
