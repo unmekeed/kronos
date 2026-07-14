@@ -45,12 +45,31 @@ ctest --test-dir build          # unit-тесты (varint, pb-поля, синт
 19 string tables (`CombatLogNames`, `instancebaseline`, `EntityNames`, ...);
 сериализатор `CDOTA_Unit_Hero_Puck` содержит 183 поля.
 
-## Дальше (спринт 6, часть 2)
+## Состояние: string tables, combat log ✅; декодер сущностей 🔴 WIP (спринт 6, часть 2/3)
 
-- Декодирование записей string tables (ключевая история, user data) —
-  разрешение имён `CombatLogNames`.
-- Combat log → структурированные события DAMAGE/HEAL/KILL/PURCHASE
-  (схема `ReplayEvents` ClickHouse).
-- Field paths (huffman) + типовые декодеры полей → позиции
-  (`m_cellX/m_cellY/m_vecOrigin`) и экономика из `svc_PacketEntities`.
+- **string_tables** — декодер `svc_Create/UpdateStringTable` (история ключей,
+  user data, snappy); `CombatLogNames` разрешает 544 имени на реальном реплее.
+- **combat_log** — `CMsgDOTACombatLogEntry` (msg id 554) с резолвом имён;
+  на реплее 8892914077: 131 818 записей, 65 убийств героев с инфликторами.
+  `demoinfo --events OUT.jsonl` пишет поток под схему `ReplayEvents`.
+- **entities/fieldpath/field_decoder — НЕ РАБОТАЕТ, в разработке.**
+  Реализованы: BitReader-совместимый декодер 40 field-path операций
+  (huffman-дерево, портирован алгоритм построения кучи из `dotabuff/manta`
+  для битовой совместимости с сетевым форматом), типовые декодеры полей
+  (quantized float, coord, векторы, строки, handle/enum), резолвер путей по
+  `SendTables` с учётом версий сериализаторов, машина состояний сущностей
+  (create/update/delete, instancebaseline). На реальном реплее декодер
+  **всё ещё расходится с потоком** (`DESYNC`, 0 обработанных пакетов) —
+  последняя находка (аргумент `ubitvar` в операциях 21–24 использует базовый,
+  а не FP-вариант кодирования) исправлена, но не проверена до конца.
+  Инструмент отладки: `ENT_DEBUG=1|2|3 ./build/demoinfo --entities out.jsonl replay.dem`
+  (уровни: команды сущностей / значения полей / операции field path).
+
+## Дальше (спринт 6, часть 3 — доделать)
+
+- Найти оставшуюся причину desync в декодере сущностей (вероятные места:
+  семантика `PushN`/`PopN`-групп операций, разбор вложенных сериализаторов
+  для массивов структур, кодировка `CUtlVector`).
+- После чистого декода: извлечь позиции (`m_cellX/m_cellY/m_vecOrigin`) и
+  экономику героев (`m_iNetWorth`, `m_iTotalEarnedGold`) в JSONL/ClickHouse.
 - Go-обвязка: Kafka-консьюмер `match.downloaded` → ядро → `replay.parsed`.

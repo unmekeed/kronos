@@ -7,9 +7,11 @@
 #include <cstring>
 #include <map>
 #include <set>
+#include <memory>
 #include <string>
 
 #include "combat_log.hpp"
+#include "entities.hpp"
 #include "demo_reader.hpp"
 #include "packet_demux.hpp"
 #include "pb_lite.hpp"
@@ -54,7 +56,9 @@ static const char* winner_name(int64_t w) {
 }
 
 static void deep_scan(DemoReader& reader, uint32_t probe_type, int probe_limit,
-                      const char* events_path) {
+                      const char* events_path, const char* entities_path) {
+    bool want_entities = entities_path != nullptr;
+    FILE* entities_out = entities_path ? std::fopen(entities_path, "w") : nullptr;
     using dota::demo::InnerMsg;
     namespace demo = dota::demo;
     namespace pb = dota::pb;
@@ -65,6 +69,11 @@ static void deep_scan(DemoReader& reader, uint32_t probe_type, int probe_limit,
     demo::SendTables send_tables;
     uint64_t inner_total = 0;
     int probed = 0;
+
+    // Сущности: создаётся после загрузки SendTables/ClassInfo.
+    std::unique_ptr<demo::Entities> entities;
+    bool entities_failed = false;
+    uint64_t pos_samples = 0;
 
     // Combat log: агрегаты и лента убийств героев.
     std::map<int32_t, uint64_t> cl_hist;
@@ -77,6 +86,13 @@ static void deep_scan(DemoReader& reader, uint32_t probe_type, int probe_limit,
         inner_total++;
         if (m.type == 44) tables.create(m.payload);
         else if (m.type == 45) tables.update(m.payload);
+        else if (m.type == 55 && entities && !entities_failed) {
+            if (!entities->on_packet_entities(m.payload)) {
+                entities_failed = true;
+                std::printf("  !! entity decode desync at packet %llu\n",
+                            (unsigned long long)entities->packets_processed());
+            }
+        }
         else if (m.type == demo::kMsgCombatLogDataHLTV) {
             auto e = demo::parse_combat_log(m.payload,
                                             tables.by_name("CombatLogNames"));
@@ -107,26 +123,37 @@ static void deep_scan(DemoReader& reader, uint32_t probe_type, int probe_limit,
         }
     };
 
+    uint32_t last_sample_tick = 0;
     auto t0 = std::chrono::steady_clock::now();
     reader.scan([&](const demo::Frame& fr) {
+        if (entities && !entities_failed && fr.tick != 0xFFFFFFFFu &&
+            fr.tick >= last_sample_tick + 300) {
+            last_sample_tick = fr.tick;
+            entities->each_hero([&](const demo::Entity& e) {
+                float x, y;
+                if (demo::Entities::world_pos(e, x, y)) {
+                    pos_samples++;
+                    if (entities_out) {
+                        std::fprintf(entities_out,
+                            "{\"tick\":%u,\"class\":\"%s\",\"x\":%.1f,\"y\":%.1f}\n",
+                            fr.tick, e.class_name.c_str(), x, y);
+                    }
+                }
+            });
+        }
         switch (demo::Cmd(fr.cmd)) {
             case demo::Cmd::Packet:
             case demo::Cmd::SignonPacket:
                 demo::demux_packet(fr.payload, on_inner);
                 break;
-            case demo::Cmd::FullPacket: {
-                // CDemoFullPacket { string_table = 1; packet = 2 }
-                pb::Reader r(fr.payload);
-                pb::Field f;
-                while (pb::next_field(r, f)) {
-                    if (f.number == 2 && f.wire_type == 2) {
-                        demo::demux_packet(f.data, on_inner);
-                    }
-                }
-                break;
-            }
+            case demo::Cmd::FullPacket:
+                break;  // снапшоты для перемотки; линейному чтению не нужны
             case demo::Cmd::ClassInfo:
                 class_info = demo::parse_class_info(fr.payload);
+                if (want_entities && !send_tables.serializers.empty()) {
+                    entities = std::make_unique<demo::Entities>(
+                        send_tables, class_info, tables);
+                }
                 break;
             case demo::Cmd::SendTables:
                 send_tables = demo::parse_send_tables(fr.payload);
@@ -194,6 +221,30 @@ static void deep_scan(DemoReader& reader, uint32_t probe_type, int probe_limit,
         std::fclose(events_out);
         std::printf("  events written : %s\n", events_path);
     }
+    if (entities) {
+        std::printf("== Entities ==\n");
+        std::printf("  huffman        : %s\n", entities->huffman_variant_name());
+        std::printf("  packets        : %llu%s\n",
+                    (unsigned long long)entities->packets_processed(),
+                    entities_failed ? " (DESYNC)" : "");
+        std::printf("  creates/updates: %llu / %llu\n",
+                    (unsigned long long)entities->creates(),
+                    (unsigned long long)entities->updates());
+        std::printf("  live entities  : %zu\n", entities->all().size());
+        std::printf("  pos_samples    : %llu\n", (unsigned long long)pos_samples);
+        std::printf("  heroes (final) :\n");
+        entities->each_hero([&](const demo::Entity& e) {
+            float x, y;
+            bool ok = demo::Entities::world_pos(e, x, y);
+            std::printf("    %-34s idx=%d pos=(%.0f, %.0f)%s\n",
+                        e.class_name.c_str(), e.index, ok ? x : 0.f,
+                        ok ? y : 0.f, ok ? "" : " [no pos]");
+        });
+    }
+    if (entities_out) {
+        std::fclose(entities_out);
+        std::printf("  positions written: %s\n", entities_path);
+    }
 }
 
 int main(int argc, char** argv) {
@@ -201,6 +252,7 @@ int main(int argc, char** argv) {
     uint32_t probe_type = 0;
     const char* path = nullptr;
     const char* events_path = nullptr;
+    const char* entities_path = nullptr;
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--deep") == 0) deep = true;
         else if (std::strcmp(argv[i], "--probe") == 0 && i + 1 < argc) {
@@ -211,10 +263,14 @@ int main(int argc, char** argv) {
             events_path = argv[++i];
             deep = true;
         }
+        else if (std::strcmp(argv[i], "--entities") == 0 && i + 1 < argc) {
+            entities_path = argv[++i];
+            deep = true;
+        }
         else path = argv[i];
     }
     if (!path) {
-        std::fprintf(stderr, "usage: %s [--deep] [--probe TYPE] [--events OUT.jsonl] <replay.dem>\n",
+        std::fprintf(stderr, "usage: %s [--deep] [--probe TYPE] [--events OUT.jsonl] [--entities OUT.jsonl] <replay.dem>\n",
                      argv[0]);
         return 2;
     }
@@ -263,7 +319,7 @@ int main(int argc, char** argv) {
             std::printf("    %-24s %llu\n", dota::demo::cmd_name(cmd),
                         (unsigned long long)n);
         }
-        if (deep) deep_scan(reader, probe_type, 3, events_path);
+        if (deep) deep_scan(reader, probe_type, 3, events_path, entities_path);
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

@@ -65,8 +65,10 @@ struct SendTables {
     std::vector<std::string> symbols;
     std::vector<SerializerField> fields;
     std::vector<Serializer> serializers;
-    // имя+версия → индекс в serializers (для привязки классов)
+    // имя → индекс сериализатора максимальной версии (привязка классов)
     std::map<std::string, size_t> by_name;
+    // (имя, версия) → индекс (привязка вложенных полей)
+    std::map<std::pair<std::string, int32_t>, size_t> by_name_version;
 };
 SendTables parse_send_tables(std::string_view payload);
 

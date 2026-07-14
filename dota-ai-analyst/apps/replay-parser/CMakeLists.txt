@@ -15,6 +15,9 @@ add_library(parser_core
   src/packet_demux.cpp
   src/string_tables.cpp
   src/combat_log.cpp
+  src/fieldpath.cpp
+  src/field_decoder.cpp
+  src/entities.cpp
 )
 target_include_directories(parser_core PUBLIC include)
 target_link_libraries(parser_core PUBLIC ${SNAPPY_LIB})

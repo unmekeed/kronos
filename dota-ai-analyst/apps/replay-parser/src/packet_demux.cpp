@@ -148,6 +148,7 @@ SendTables parse_send_tables(std::string_view payload) {
     struct RawField {
         uint64_t var_type_sym = 0, var_name_sym = 0, send_node_sym = 0;
         uint64_t field_serializer_name_sym = ~0ull, var_encoder_sym = ~0ull;
+        int32_t field_serializer_version = 0;
         int32_t bit_count = 0, encode_flags = 0;
         float low_value = 0.0f, high_value = 0.0f;
     };
@@ -176,6 +177,7 @@ SendTables parse_send_tables(std::string_view payload) {
                         case 5: rf.high_value = bits_to_float(ff.varint); break;
                         case 6: rf.encode_flags = int32_t(ff.varint); break;
                         case 7: rf.field_serializer_name_sym = ff.varint; break;
+                        case 8: rf.field_serializer_version = int32_t(ff.varint); break;
                         case 9: rf.send_node_sym = ff.varint; break;
                         case 10: rf.var_encoder_sym = ff.varint; break;
                         default: break;
@@ -224,16 +226,28 @@ SendTables parse_send_tables(std::string_view payload) {
         s.name = sym(st.symbols, rs.name_sym);
         s.version = rs.version;
         s.field_indexes = rs.field_indexes;
-        st.by_name[s.name] = st.serializers.size();
+        size_t idx = st.serializers.size();
+        st.by_name_version[{s.name, s.version}] = idx;
+        auto it = st.by_name.find(s.name);
+        if (it == st.by_name.end() ||
+            st.serializers[it->second].version < s.version) {
+            st.by_name[s.name] = idx;
+        }
         st.serializers.push_back(std::move(s));
     }
 
-    // Второй проход: привязка вложенных сериализаторов к полям.
+    // Второй проход: привязка вложенных сериализаторов к полям — строго
+    // по паре (имя, версия): версии одного имени имеют разные наборы полей.
     for (size_t i = 0; i < raw_fields.size(); i++) {
         if (raw_fields[i].field_serializer_name_sym == ~0ull) continue;
         auto name = sym(st.symbols, raw_fields[i].field_serializer_name_sym);
-        auto it = st.by_name.find(name);
-        if (it != st.by_name.end()) {
+        auto it = st.by_name_version.find(
+            {name, raw_fields[i].field_serializer_version});
+        if (it == st.by_name_version.end()) {
+            auto fallback = st.by_name.find(name);
+            if (fallback != st.by_name.end())
+                st.fields[i].field_serializer = int32_t(fallback->second);
+        } else {
             st.fields[i].field_serializer = int32_t(it->second);
         }
     }
