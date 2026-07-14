@@ -12,6 +12,7 @@ find_library(SNAPPY_LIB snappy REQUIRED)
 
 add_library(parser_core
   src/demo_reader.cpp
+  src/packet_demux.cpp
 )
 target_include_directories(parser_core PUBLIC include)
 target_link_libraries(parser_core PUBLIC ${SNAPPY_LIB})

@@ -28,9 +28,29 @@ ctest --test-dir build          # unit-тесты (varint, pb-поля, синт
 ./build/demoinfo replay.dem     # сводка по реальному файлу
 ```
 
-## Дальше (спринт 6)
+## Состояние: демукс пакетов и схема сущностей (спринт 6, часть 1) ✅
 
-- **EntityDecoder**: разбор `DEM_SendTables`/`DEM_ClassInfo` (flattened serializers),
-  string tables, чтение baseline'ов и delta-обновлений сущностей из `DEM_Packet`.
-- Извлечение позиций (`m_cellX/m_cellY/m_vecOrigin`) и экономики игроков.
-- Go-обвязка: Kafka-консьюмер `match.downloaded` → вызов ядра → `replay.parsed`.
+- **BitReader** — little-endian битовый ридер (read_bits, ubitvar, varint,
+  не выровненные байтовые чтения).
+- **packet_demux** — внутренний слой `DEM_Packet`/`DEM_SignonPacket`/`DEM_FullPacket`:
+  `CDemoPacket.data` → поток сообщений `ubitvar type | varint size | payload`.
+- **Схема сущностей**: `CDemoClassInfo` (class_id → имя) и
+  `CSVCMsg_FlattenedSerializer` из `CDemoSendTables` (символы, поля с
+  bit_count/low/high/encoder, сериализаторы с индексами полей, привязка
+  вложенных сериализаторов).
+- `demoinfo --deep` — гистограмма внутренних сообщений, имена string tables.
+
+Замер на реплее 8892914077: **958 639 внутренних сообщений за 457 мс**;
+схема: 3 229 классов, 3 294 сериализатора, 5 522 символа; найдены все
+19 string tables (`CombatLogNames`, `instancebaseline`, `EntityNames`, ...);
+сериализатор `CDOTA_Unit_Hero_Puck` содержит 183 поля.
+
+## Дальше (спринт 6, часть 2)
+
+- Декодирование записей string tables (ключевая история, user data) —
+  разрешение имён `CombatLogNames`.
+- Combat log → структурированные события DAMAGE/HEAL/KILL/PURCHASE
+  (схема `ReplayEvents` ClickHouse).
+- Field paths (huffman) + типовые декодеры полей → позиции
+  (`m_cellX/m_cellY/m_vecOrigin`) и экономика из `svc_PacketEntities`.
+- Go-обвязка: Kafka-консьюмер `match.downloaded` → ядро → `replay.parsed`.

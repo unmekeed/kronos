@@ -9,7 +9,9 @@
 #include <string>
 #include <vector>
 
+#include "bit_reader.hpp"
 #include "demo_reader.hpp"
+#include "packet_demux.hpp"
 #include "pb_lite.hpp"
 
 namespace {
@@ -161,6 +163,109 @@ void test_bad_magic_rejected() {
     std::remove(path.c_str());
 }
 
+// -- BitReader -----------------------------------------------------------
+
+class BitWriter {
+  public:
+    void put_bits(uint32_t v, uint32_t n) {
+        for (uint32_t i = 0; i < n; i++) {
+            if (bit_ == 0) buf_.push_back(0);
+            if (v & (1u << i)) buf_.back() |= uint8_t(1u << bit_);
+            bit_ = (bit_ + 1) & 7;
+        }
+    }
+    void put_ubitvar(uint32_t v) {
+        if (v < 16) { put_bits(v, 6); }
+        else if (v < (1u << 8)) { put_bits(0x10 | (v & 15), 6); put_bits(v >> 4, 4); }
+        else if (v < (1u << 12)) { put_bits(0x20 | (v & 15), 6); put_bits(v >> 4, 8); }
+        else { put_bits(0x30 | (v & 15), 6); put_bits(v >> 4, 28); }
+    }
+    void put_varuint32(uint32_t v) {
+        while (v >= 0x80) { put_bits((v & 0x7F) | 0x80, 8); v >>= 7; }
+        put_bits(v, 8);
+    }
+    void put_bytes(std::string_view s) {
+        for (char c : s) put_bits(uint8_t(c), 8);
+    }
+    std::string_view view() const {
+        return {reinterpret_cast<const char*>(buf_.data()), buf_.size()};
+    }
+
+  private:
+    std::vector<uint8_t> buf_;
+    int bit_ = 0;
+};
+
+void test_bit_reader_basic() {
+    BitWriter w;
+    w.put_bits(0b101, 3);
+    w.put_bits(0xABCD, 16);
+    w.put_bits(1, 1);
+    dota::bits::BitReader r(w.view());
+    CHECK(r.read_bits(3) == 0b101);
+    CHECK(r.read_bits(16) == 0xABCD);
+    CHECK(r.read_bool());
+    CHECK(!r.overflowed());
+}
+
+void test_bit_reader_ubitvar() {
+    for (uint32_t v : {0u, 15u, 16u, 255u, 256u, 4095u, 4096u, 0x0FFFFFFFu}) {
+        BitWriter w;
+        w.put_ubitvar(v);
+        dota::bits::BitReader r(w.view());
+        CHECK(r.read_ubitvar() == v);
+    }
+}
+
+void test_bit_reader_overflow() {
+    std::string one_byte = "\xFF";
+    dota::bits::BitReader r(one_byte);
+    r.read_bits(8);
+    r.read_bits(1);
+    CHECK(r.overflowed());
+}
+
+void test_demux_roundtrip() {
+    // Собираем CDemoPacket { data(3) = битовый поток из 2 сообщений },
+    // включая не выровненный по байту старт второго сообщения.
+    BitWriter w;
+    w.put_ubitvar(40);            // svc_ServerInfo
+    w.put_varuint32(5);
+    w.put_bytes("hello");
+    w.put_ubitvar(466);           // DOTA_UM_ChatEvent
+    w.put_varuint32(3);
+    w.put_bytes("abc");
+    auto stream = w.view();
+
+    std::string packet;
+    packet.push_back(char((3 << 3) | 2));       // поле 3, len-delimited
+    packet.push_back(char(stream.size()));
+    packet += std::string(stream);
+
+    std::vector<std::pair<uint32_t, std::string>> got;
+    size_t n = dota::demo::demux_packet(
+        packet, [&](const dota::demo::InnerMsg& m) {
+            got.emplace_back(m.type, std::string(m.payload));
+        });
+    CHECK(n == 2);
+    CHECK(got.size() == 2);
+    CHECK(got[0].first == 40 && got[0].second == "hello");
+    CHECK(got[1].first == 466 && got[1].second == "abc");
+}
+
+void test_class_info_parse() {
+    // CDemoClassInfo { classes(1) { class_id(1)=9, network_name(2)="CDOTAPlayer" } }
+    std::string cls;
+    put_varint(cls, (1 << 3) | 0); put_varint(cls, 9);
+    put_varint(cls, (2 << 3) | 2); put_varint(cls, 11); cls += "CDOTAPlayer";
+    std::string msg;
+    put_varint(msg, (1 << 3) | 2); put_varint(msg, cls.size()); msg += cls;
+
+    auto info = dota::demo::parse_class_info(msg);
+    CHECK(info.classes.size() == 1);
+    CHECK(info.classes.at(9) == "CDOTAPlayer");
+}
+
 }  // namespace
 
 int main() {
@@ -169,6 +274,11 @@ int main() {
     test_fields();
     test_demo_reader_synthetic();
     test_bad_magic_rejected();
+    test_bit_reader_basic();
+    test_bit_reader_ubitvar();
+    test_bit_reader_overflow();
+    test_demux_roundtrip();
+    test_class_info_parse();
     if (g_failures == 0) {
         std::printf("ALL TESTS PASSED\n");
         return 0;
