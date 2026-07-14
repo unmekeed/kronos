@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [feature-extractor]
+        service: [feature-extractor, ml-service]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -47,7 +47,7 @@ jobs:
           python-version: "3.11"
       - name: Test
         run: |
-          pip install pytest
+          pip install pytest -r apps/${{ matrix.service }}/requirements.txt
           pytest apps/${{ matrix.service }}/tests -q
 
   cpp-parser:
