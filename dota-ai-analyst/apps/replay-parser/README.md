@@ -78,8 +78,39 @@ ctest --test-dir build          # unit-тесты (varint, pb-поля, синт
 300 тиков), в сводке — итоговый net worth всех 10 слотов из
 `CDOTA_DataRadiant`/`CDOTA_DataDire` (значения сверены с эталоном manta).
 
-## Дальше (спринт 7)
+## Состояние: Go-обвязка parser-svc ✅ (спринт 7)
 
-- Go-обвязка: Kafka-консьюмер `match.downloaded` → ядро → `replay.parsed`.
-- ETL: `positions/events JSONL` → ClickHouse (`PositionSnapshots`,
-  `ReplayEvents`, `EconomyTimeline`).
+`svc/` — сервис-обвязка ядра (Гл. 5, Гл. 2.3):
+
+- Kafka-консьюмер `match.downloaded` (franz-go, consumer group
+  `replay-parser`, ручной коммит оффсетов — at-least-once);
+- скачивание `.dem` из MinIO по `replay_url` (`s3://bucket/key`);
+- запуск `demoinfo --events --entities` подпроцессом, контроль DESYNC,
+  извлечение `match_id` из сводки;
+- потоковая загрузка JSONL в ClickHouse по HTTP (`INSERT ... FORMAT
+  JSONEachRow`, без буферизации файла в памяти): combat log →
+  `ReplayEvents` (DAMAGE/HEAL/KILL/ABILITY_CAST/ITEM_PURCHASE),
+  позиции героев → `PositionSnapshots`;
+- публикация `replay.parsed` (конверт Гл. 2.3.3, trace_id сквозной);
+  ошибки — в `dlq.parser` с причиной и исходным событием, оффсет
+  коммитится в любом случае (битая запись не блокирует партицию).
+
+Смоук-тест на реплее 8892914077 через живую инфраструктуру
+(docker-compose): событие → скачивание 110.6 МиБ из MinIO → разбор →
+56 252 строки в `ReplayEvents` + 4 849 в `PositionSnapshots` (счётчики
+1:1 с combat log ядра) → `replay.parsed` за ~5.4 с (с горячим кэшем).
+
+Запуск: `make parser-svc` (локально) или `docker build` по `Dockerfile`
+(мультистейдж: C++ ядро + Go-бинарь в одном образе). Конфигурация —
+env-переменные (`KAFKA_BROKERS`, `S3_ENDPOINT`, `CLICKHOUSE_URL`,
+`DEMOINFO_PATH`, ...), см. `svc/internal/config`.
+
+## Дальше (спринт 8)
+
+- EconomyTimeline: периодические сэмплы net worth/XP из
+  `CDOTA_DataRadiant/Dire` (ядро уже декодирует поля — добавить
+  выгрузку таймлайна в JSONL и загрузку в ClickHouse).
+- Обновление статуса AnalysisJob в PostgreSQL по `replay.parsed`
+  (сейчас статус остаётся `queued`; решить, кто владелец перехода —
+  gateway-консьюмер или parser-svc напрямую).
+- Feature Extractor (Гл. 6): фичи из ClickHouse по `replay.parsed`.

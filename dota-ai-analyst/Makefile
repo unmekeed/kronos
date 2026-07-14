@@ -1,6 +1,6 @@
 # Корневые цели монорепозитория Dota AI Analyst (Гл. 13.7 спецификации).
 
-GO_SERVICES := apps/api-gateway
+GO_SERVICES := apps/api-gateway apps/replay-parser/svc
 COMPOSE     := docker compose -f deployments/docker-compose.yml
 
 .PHONY: up down ps topics migrate migrate-pg migrate-ch lint test build clean
@@ -26,10 +26,13 @@ migrate-pg:    ## Миграции PostgreSQL
 	PGPASSWORD=dota_dev_password psql -h localhost -U dota -d dota_analyst \
 		-v ON_ERROR_STOP=1 -f infra/migrations/postgres/001_init.sql
 
-migrate-ch:    ## Миграции ClickHouse
-	docker exec -i dota-ai-analyst-clickhouse-1 clickhouse-client \
-		--user dota --password dota_dev_password --multiquery \
-		< infra/migrations/clickhouse/001_init.sql
+migrate-ch:    ## Миграции ClickHouse (все файлы по порядку)
+	@for f in infra/migrations/clickhouse/*.sql; do \
+		echo ">> $$f"; \
+		docker exec -i dota-ai-analyst-clickhouse-1 clickhouse-client \
+			--user dota --password dota_dev_password --multiquery \
+			< $$f || exit 1; \
+	done
 
 ## Код -------------------------------------------------------------------------
 
@@ -59,3 +62,8 @@ parser-build:  ## Собрать ядро парсера и CLI demoinfo
 
 parser-test: parser-build  ## Unit-тесты ядра парсера
 	ctest --test-dir apps/replay-parser/build --output-on-failure
+
+parser-svc: parser-build  ## Запустить Go-обвязку парсера локально
+	cd apps/replay-parser/svc && \
+		DEMOINFO_PATH=$(CURDIR)/apps/replay-parser/build/demoinfo \
+		go run ./cmd/parser-svc
