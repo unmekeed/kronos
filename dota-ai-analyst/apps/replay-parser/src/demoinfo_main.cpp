@@ -3,16 +3,49 @@
 // DEM_Packet и загружает схему сущностей (ClassInfo + FlattenedSerializer).
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <set>
 #include <string>
 
+#include "combat_log.hpp"
 #include "demo_reader.hpp"
 #include "packet_demux.hpp"
 #include "pb_lite.hpp"
+#include "string_tables.hpp"
 
 using dota::demo::DemoReader;
+
+// Отладочный дампер структуры protobuf-сообщений неизвестного типа:
+// печатает номера/типы/превью полей первых образцов.
+static void probe_message(std::string_view payload, int depth = 0) {
+    namespace pb = dota::pb;
+    pb::Reader r(payload);
+    pb::Field f;
+    while (pb::next_field(r, f)) {
+        std::printf("%*s#%u wt%u ", depth * 2 + 4, "", f.number, f.wire_type);
+        if (f.wire_type == 2) {
+            bool printable = !f.data.empty();
+            for (char c : f.data.substr(0, 24))
+                if (uint8_t(c) < 0x20 || uint8_t(c) > 0x7E) { printable = false; break; }
+            if (printable) {
+                std::printf("str \"%.*s\"%s\n", int(f.data.size() > 24 ? 24 : f.data.size()),
+                            f.data.data(), f.data.size() > 24 ? "…" : "");
+            } else {
+                std::printf("bytes[%zu]\n", f.data.size());
+                if (depth < 2 && f.data.size() < 200) probe_message(f.data, depth + 1);
+            }
+        } else if (f.wire_type == 5) {
+            float fl;
+            uint32_t b = uint32_t(f.varint);
+            std::memcpy(&fl, &b, 4);
+            std::printf("f32 %g\n", fl);
+        } else {
+            std::printf("varint %llu\n", (unsigned long long)f.varint);
+        }
+    }
+}
 
 static const char* winner_name(int64_t w) {
     if (w == 2) return "Radiant";
@@ -20,29 +53,57 @@ static const char* winner_name(int64_t w) {
     return "Unknown";
 }
 
-static void deep_scan(DemoReader& reader) {
+static void deep_scan(DemoReader& reader, uint32_t probe_type, int probe_limit,
+                      const char* events_path) {
     using dota::demo::InnerMsg;
     namespace demo = dota::demo;
     namespace pb = dota::pb;
 
     std::map<uint32_t, uint64_t> inner_hist;
-    std::set<std::string> string_tables;
+    demo::StringTables tables;
     demo::ClassInfo class_info;
     demo::SendTables send_tables;
     uint64_t inner_total = 0;
+    int probed = 0;
+
+    // Combat log: агрегаты и лента убийств героев.
+    std::map<int32_t, uint64_t> cl_hist;
+    struct Kill { float t; std::string victim, killer, inflictor; };
+    std::vector<Kill> hero_kills;
+    FILE* events_out = events_path ? std::fopen(events_path, "w") : nullptr;
 
     auto on_inner = [&](const InnerMsg& m) {
         inner_hist[m.type]++;
         inner_total++;
-        if (m.type == 44) {  // svc_CreateStringTable { name = 1 }
-            pb::Reader r(m.payload);
-            pb::Field f;
-            while (pb::next_field(r, f)) {
-                if (f.number == 1 && f.wire_type == 2) {
-                    string_tables.insert(std::string(f.data));
-                    break;
-                }
+        if (m.type == 44) tables.create(m.payload);
+        else if (m.type == 45) tables.update(m.payload);
+        else if (m.type == demo::kMsgCombatLogDataHLTV) {
+            auto e = demo::parse_combat_log(m.payload,
+                                            tables.by_name("CombatLogNames"));
+            cl_hist[e.type]++;
+            bool is_hero_death =
+                e.type == int32_t(demo::CombatLogType::Death) &&
+                e.is_target_hero && !e.is_target_illusion;
+            if (is_hero_death) {
+                hero_kills.push_back({e.timestamp, e.target_name,
+                                      e.attacker_name, e.inflictor_name});
             }
+            if (events_out) {
+                std::fprintf(events_out,
+                    "{\"type\":\"%s\",\"t\":%.2f,\"attacker\":\"%s\","
+                    "\"target\":\"%s\",\"inflictor\":\"%s\",\"value\":%lld,"
+                    "\"attacker_hero\":%d,\"target_hero\":%d}\n",
+                    demo::combat_log_type_name(e.type), e.timestamp,
+                    e.attacker_name.c_str(), e.target_name.c_str(),
+                    e.inflictor_name.c_str(), (long long)e.value,
+                    e.is_attacker_hero ? 1 : 0, e.is_target_hero ? 1 : 0);
+            }
+        }
+        if (probe_type != 0 && m.type == probe_type && probed < probe_limit) {
+            std::printf("---- probe msg type %u, sample %d, %zu bytes ----\n",
+                        m.type, probed, m.payload.size());
+            probe_message(m.payload);
+            probed++;
         }
     };
 
@@ -84,8 +145,20 @@ static void deep_scan(DemoReader& reader) {
     std::printf("  serializers    : %zu (fields %zu, symbols %zu)\n",
                 send_tables.serializers.size(), send_tables.fields.size(),
                 send_tables.symbols.size());
-    std::printf("  string_tables  : %zu\n", string_tables.size());
-    for (const auto& n : string_tables) std::printf("    %s\n", n.c_str());
+    std::printf("  string_tables  : %zu\n", tables.count());
+    if (const auto* cl = tables.by_name("CombatLogNames")) {
+        std::printf("  CombatLogNames : %zu entries; first 10:\n",
+                    cl->entries.size());
+        int shown = 0;
+        for (const auto& [idx, e] : cl->entries) {
+            if (shown++ >= 10) break;
+            std::printf("    [%d] %s\n", idx, e.key.c_str());
+        }
+    }
+    if (const auto* bl = tables.by_name("instancebaseline")) {
+        std::printf("  instancebaseline: %zu entries (baseline bitstreams)\n",
+                    bl->entries.size());
+    }
     std::printf("  inner_by_type  :\n");
     for (const auto& [type, n] : inner_hist) {
         const char* name = demo::inner_msg_name(type);
@@ -99,17 +172,50 @@ static void deep_scan(DemoReader& reader) {
         std::printf("  sample class   : %s (fields %zu)\n", s.name.c_str(),
                     s.field_indexes.size());
     }
+
+    if (!cl_hist.empty()) {
+        uint64_t cl_total = 0;
+        for (const auto& [t, n] : cl_hist) cl_total += n;
+        std::printf("== Combat log ==\n");
+        std::printf("  entries        : %llu\n", (unsigned long long)cl_total);
+        for (const auto& [t, n] : cl_hist) {
+            std::printf("    %-16s %llu\n", demo::combat_log_type_name(t),
+                        (unsigned long long)n);
+        }
+        std::printf("  hero_kills     : %zu\n", hero_kills.size());
+        size_t show = hero_kills.size() < 8 ? hero_kills.size() : 8;
+        for (size_t i = 0; i < show; i++) {
+            const auto& k = hero_kills[i];
+            std::printf("    [%6.1fs] %s -> %s (%s)\n", k.t, k.killer.c_str(),
+                        k.victim.c_str(), k.inflictor.c_str());
+        }
+    }
+    if (events_out) {
+        std::fclose(events_out);
+        std::printf("  events written : %s\n", events_path);
+    }
 }
 
 int main(int argc, char** argv) {
     bool deep = false;
+    uint32_t probe_type = 0;
     const char* path = nullptr;
+    const char* events_path = nullptr;
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--deep") == 0) deep = true;
+        else if (std::strcmp(argv[i], "--probe") == 0 && i + 1 < argc) {
+            probe_type = uint32_t(std::atoi(argv[++i]));
+            deep = true;
+        }
+        else if (std::strcmp(argv[i], "--events") == 0 && i + 1 < argc) {
+            events_path = argv[++i];
+            deep = true;
+        }
         else path = argv[i];
     }
     if (!path) {
-        std::fprintf(stderr, "usage: %s [--deep] <replay.dem>\n", argv[0]);
+        std::fprintf(stderr, "usage: %s [--deep] [--probe TYPE] [--events OUT.jsonl] <replay.dem>\n",
+                     argv[0]);
         return 2;
     }
     try {
@@ -157,7 +263,7 @@ int main(int argc, char** argv) {
             std::printf("    %-24s %llu\n", dota::demo::cmd_name(cmd),
                         (unsigned long long)n);
         }
-        if (deep) deep_scan(reader);
+        if (deep) deep_scan(reader, probe_type, 3, events_path);
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

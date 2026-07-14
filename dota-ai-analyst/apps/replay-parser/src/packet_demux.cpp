@@ -26,21 +26,27 @@ const char* inner_msg_name(uint32_t type) {
         case 51: return "svc_ClearAllStringTables";
         case 55: return "svc_PacketEntities";
         case 62: return "svc_VoiceData";
-        // GameEvents (Source1 legacy)
-        case 30: return "GE_Source1LegacyGameEventList";
-        case 32: return "GE_Source1LegacyGameEvent";
-        case 33: return "GE_SosStartSoundEvent";
-        case 34: return "GE_SosStopSoundEvent";
-        case 124: return "UM_ParticleManager";
-        case 145: return "UM_PlayResponseConditional";
-        // DOTA user messages (частые)
+        // EBaseGameEvents
+        case 205: return "GE_Source1LegacyGameEventList";
+        case 207: return "GE_Source1LegacyGameEvent";
+        case 208: return "GE_SosStartSoundEvent";
+        case 209: return "GE_SosStopSoundEvent";
+        case 210: return "GE_SosSetSoundEventParams";
+        case 212: return "GE_SosStopSoundEventHash";
+        // EDotaUserMessages (частые)
         case 466: return "DOTA_UM_ChatEvent";
-        case 472: return "DOTA_UM_LocationPing";
-        case 488: return "DOTA_UM_MinimapEvent";
-        case 518: return "DOTA_UM_SpectatorPlayerClick";
-        case 547: return "DOTA_UM_ProjectionEvent";
-        case 554: return "DOTA_UM_ChatWheel";
-        case 588: return "DOTA_UM_OverheadEvent";
+        case 467: return "DOTA_UM_CombatHeroPositions";
+        case 471: return "DOTA_UM_CreateLinearProjectile";
+        case 472: return "DOTA_UM_DestroyLinearProjectile";
+        case 473: return "DOTA_UM_DodgeTrackingProjectiles";
+        case 477: return "DOTA_UM_LocationPing";
+        case 478: return "DOTA_UM_MapLine";
+        case 481: return "DOTA_UM_MinimapEvent";
+        case 483: return "DOTA_UM_OverheadEvent";
+        case 485: return "DOTA_UM_SharedCooldown";
+        case 486: return "DOTA_UM_SpectatorPlayerClick";
+        case 488: return "DOTA_UM_UnitEvent";
+        case 492: return "DOTA_UM_ItemPurchased";
         default: return nullptr;
     }
 }
