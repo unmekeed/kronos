@@ -8,18 +8,23 @@
 | Фаза | Состояние | Содержание |
 |---|---|---|
 | **Фаза 1: Инфраструктура** | ✅ завершена (спринты 1–4) | compose-инфраструктура, миграции PG/CH, Kafka-топики, API Gateway (S3+outbox), Data Collector |
-| Фаза 2: Парсинг и ETL | 🟡 в работе (спринт 5 ✅) | Replay Parser (C++): DemoReader готов, проверен на реальном 110МБ реплее (62 мс/проход) |
-| Фаза 3: Аналитика и ML | ⚪ не начата | Feature Store, WP/Laning/Draft/Error модели |
-| Фаза 4: UI, MLOps, Релиз | ⚪ не начата | Frontend, дрейф-мониторинг, нагрузочные тесты |
+| **Фаза 2: Парсинг и ETL** | ✅ завершена (спринты 5–9) | Replay Parser (C++, полный декодер сущностей) + Go-обвязка, ClickHouse-слой сырых событий, Feature Extractor |
+| **Фаза 3: Аналитика и ML** | 🟡 в работе (спринты 10–11) | витрины фич, бейзлайн Win Probability (LightGBM + калибровка), массовый сбор через OpenDota |
+| Фаза 4: UI, MLOps, Релиз | ⚪ не начата | Frontend, gRPC-инференс, MLflow, дрейф-мониторинг |
 
 ### Что уже работает (проверено против живой инфраструктуры)
 
+Полный конвейер: **OpenDota/загрузка → MinIO → Kafka → C++ парсер →
+ClickHouse → фичи → модель Win Probability** — на реальных
+профессиональных матчах.
+
 - `deployments/docker-compose.yml` — PostgreSQL 16, ClickHouse 24.8, Kafka 3.8 (KRaft), Redis 7, MinIO; все с healthcheck.
-- `infra/migrations/` — реляционная схема Гл. 4.2 (7 таблиц, enum-типы, индексы) и аналитическая схема Гл. 4.4 (ReplayEvents, EconomyTimeline, PositionSnapshots).
-- `infra/kafka/create-topics.sh` — 7 топиков реестра Гл. 2.3.1 с retention-политиками.
-- `libs/schemas/event-envelope.schema.json` — JSON Schema конверта события Гл. 2.3.3.
-- `apps/api-gateway` — Go-сервис: `/healthz`, `/readyz` (ping PG), `POST /api/v1/matches/upload` (файл → MinIO, job + outbox-событие в одной PG-транзакции → 202), `GET /api/v1/jobs/{id}`, ошибки RFC 7807, trace_id (W3C traceparent), JSON-логи, token-bucket rate limit; фоновый **outbox-relay** публикует события в Kafka (`FOR UPDATE SKIP LOCKED`, безопасен при нескольких репликах); unit-тесты; distroless Dockerfile.
-- `apps/data-collector` — Python-сервис: абстракция `Source` (ACL, Гл. 2.5) с реализациями `OpenDotaSource` (pull по match_id-курсору) и `FixtureSource` (dev/тесты); дедупликация по `CollectedMatches`, курсор в `CollectorCursor`, выгрузка `.dem` в MinIO, публикация `match.downloaded`; unit-тесты; Dockerfile.
+- `infra/migrations/` — реляционная схема Гл. 4.2, аналитический слой Гл. 4.4 (ReplayEvents, EconomyTimeline, PositionSnapshots) и витрины фич (PlayerMatchFeatures, MatchTimelineFeatures).
+- `apps/api-gateway` — Go: upload → MinIO + outbox → Kafka; статусы AnalysisJob по `replay.parsed`/`dlq.parser`; RFC 7807, trace_id, rate limit.
+- `apps/data-collector` — Python: `OpenDotaSource` (/proMatches + /matches/{id}, скачивание с реплей-серверов Valve, bz2, проверка магии PBDEMS2), дедуп/курсор в PG, лимит за цикл.
+- `apps/replay-parser` — C++17-ядро (битово-совместимый с `dotabuff/manta` декодер сущностей: позиции, экономика, combat log; 110 МиБ за ~4 с) + Go-сервис `svc/` (Kafka → ядро → ClickHouse → `replay.parsed`, DLQ).
+- `apps/feature-extractor` — Python: `replay.parsed` → point-in-time фичи (GPM/XPM, LH/DN@5/10, поминутные диффы) → витрины + `features.calculated`.
+- `apps/ml-service` — обучение Win Probability (LightGBM + изотоническая калибровка, group split по матчам, Brier ≈ 0.13–0.15 на отложенных) и CLI WP-кривой матча.
 
 ## Быстрый старт
 
@@ -46,5 +51,6 @@ curl -X POST localhost:8080/api/v1/matches/upload -F "file=@replay.dem"
 
 ## Следующие шаги
 
-1. Фаза 2 (спринт 6): EntityDecoder — SendTables/flattened serializers, string tables, позиции и экономика из `DEM_Packet`.
-2. Фаза 2 (спринты 7–8): Go-обвязка парсера (Kafka), ETL-конвейер `replay.parsed` → валидация → ClickHouse/PostgreSQL → `features.calculated`.
+1. Массовый датасет: продолжительный сбор OpenDota (десятки-сотни матчей), переобучение WP без синтетики, контроль Brier ≤ 0.18 (Гл. 6.2.2).
+2. Prediction Service: gRPC-инференс поверх артефакта + онлайн-фичи (Гл. 3.7).
+3. MLOps: MLflow Registry, ml-retrain workflow (Гл. 10).
