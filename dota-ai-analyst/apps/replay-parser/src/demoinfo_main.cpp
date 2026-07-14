@@ -56,6 +56,31 @@ static const char* winner_name(int64_t w) {
     return "Unknown";
 }
 
+// JSON-эскейп строки: имена игроков произвольны (кавычки, backslash,
+// управляющие символы), а сводка --summary читается машиной.
+static std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof buf, "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += char(c);
+                }
+        }
+    }
+    return out;
+}
+
 // Достать int64 из watched-поля сущности; def — если поля нет.
 static int64_t watched_int(const dota::demo::Entity& e, const char* key,
                            int64_t def = 0) {
@@ -369,6 +394,7 @@ int main(int argc, char** argv) {
     const char* events_path = nullptr;
     const char* entities_path = nullptr;
     const char* economy_path = nullptr;
+    const char* summary_path = nullptr;
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--deep") == 0) deep = true;
         else if (std::strcmp(argv[i], "--probe") == 0 && i + 1 < argc) {
@@ -387,10 +413,13 @@ int main(int argc, char** argv) {
             economy_path = argv[++i];
             deep = true;
         }
+        else if (std::strcmp(argv[i], "--summary") == 0 && i + 1 < argc) {
+            summary_path = argv[++i];
+        }
         else path = argv[i];
     }
     if (!path) {
-        std::fprintf(stderr, "usage: %s [--deep] [--probe TYPE] [--events OUT.jsonl] [--entities OUT.jsonl] [--economy OUT.jsonl] <replay.dem>\n",
+        std::fprintf(stderr, "usage: %s [--deep] [--probe TYPE] [--events OUT.jsonl] [--entities OUT.jsonl] [--economy OUT.jsonl] [--summary OUT.json] <replay.dem>\n",
                      argv[0]);
         return 2;
     }
@@ -417,6 +446,30 @@ int main(int argc, char** argv) {
         for (const auto& p : info.players) {
             std::printf("    [team %lld] %-25s %s\n", (long long)p.game_team,
                         p.player_name.c_str(), p.hero_name.c_str());
+        }
+
+        if (summary_path) {
+            FILE* sf = std::fopen(summary_path, "w");
+            if (!sf) {
+                std::fprintf(stderr, "error: cannot open %s\n", summary_path);
+                return 1;
+            }
+            std::fprintf(sf,
+                "{\"match_id\":%llu,\"winner\":\"%s\",\"game_mode\":%lld,"
+                "\"playback_time_s\":%.1f,\"build\":%lld,\"players\":[",
+                (unsigned long long)info.match_id, winner_name(info.game_winner),
+                (long long)info.game_mode, info.playback_time_s,
+                (long long)header.build_num);
+            for (size_t i = 0; i < info.players.size(); i++) {
+                const auto& p = info.players[i];
+                std::fprintf(sf, "%s{\"team\":%lld,\"name\":\"%s\",\"hero\":\"%s\"}",
+                             i ? "," : "", (long long)p.game_team,
+                             json_escape(p.player_name).c_str(),
+                             json_escape(p.hero_name).c_str());
+            }
+            std::fprintf(sf, "]}\n");
+            std::fclose(sf);
+            std::printf("  summary written: %s\n", summary_path);
         }
 
         auto t0 = std::chrono::steady_clock::now();

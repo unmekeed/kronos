@@ -122,8 +122,17 @@ outbox → Kafka → парсер (56 252 события + 4 849 позиций 
 `GET /api/v1/jobs/{id}`. Путь ошибки проверен на битом событии: DLQ →
 `failed`.
 
-## Дальше (спринт 9)
+## Спринт 9: сводка --summary и ростер в replay.parsed ✅
 
-- Feature Extractor (Гл. 6): витрина фич из ClickHouse по
-  `replay.parsed` (голд-графики, контроль карты, тайминги предметов).
-- Датасет для обучения: выгрузка фич + исход матча (Гл. 7.2).
+- `demoinfo --summary OUT.json` — машиночитаемая сводка (match_id,
+  победитель, режим, длительность, ростер team/name/hero с JSON-эскейпом
+  произвольных ников); parser-svc читает её вместо разбора stdout.
+- Payload `replay.parsed` расширен: `winner`, `duration_s`, `players[]`
+  (порядок Radiant 0-4 → Dire 5-9 — согласован с player_id в
+  EconomyTimeline). Потребитель — `apps/feature-extractor` (см. его README).
+
+## Дальше (спринт 10)
+
+- Датасет для обучения Win Probability: выгрузка MatchTimelineFeatures
+  по многим матчам + бейзлайн-модель (Гл. 6.2.2, Гл. 7.2).
+- Массовый прогон: Data Collector → очередь реальных реплеев.

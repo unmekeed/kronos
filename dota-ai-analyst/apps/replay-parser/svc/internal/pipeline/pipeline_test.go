@@ -1,6 +1,9 @@
 package pipeline
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestParseS3URL(t *testing.T) {
 	cases := []struct {
@@ -42,10 +45,16 @@ func TestEventTypeMapMatchesEnum(t *testing.T) {
 	}
 }
 
-func TestMatchIDRegexp(t *testing.T) {
-	out := "== FileInfo ==\n  match_id       : 8892914077\n  winner: Dire\n"
-	m := matchIDRe.FindStringSubmatch(out)
-	if m == nil || m[1] != "8892914077" {
-		t.Fatalf("match_id не извлечён из сводки: %v", m)
+func TestSummaryDecode(t *testing.T) {
+	raw := `{"match_id":8892914077,"winner":"Dire","game_mode":2,` +
+		`"playback_time_s":4497.3,"build":10836,"players":[` +
+		`{"team":2,"name":"Yatoro","hero":"npc_dota_hero_naga_siren"}]}`
+	var s Summary
+	if err := json.Unmarshal([]byte(raw), &s); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if s.MatchID != 8892914077 || s.Winner != "Dire" ||
+		len(s.Players) != 1 || s.Players[0].Hero != "npc_dota_hero_naga_siren" {
+		t.Fatalf("сводка распарсена неверно: %+v", s)
 	}
 }

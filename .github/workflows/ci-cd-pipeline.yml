@@ -35,6 +35,21 @@ jobs:
         run: go build ./...
         working-directory: dota-ai-analyst/apps/${{ matrix.service }}
 
+  python-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [feature-extractor]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Test
+        run: |
+          pip install pytest
+          pytest apps/${{ matrix.service }}/tests -q
+
   cpp-parser:
     runs-on: ubuntu-latest
     steps:

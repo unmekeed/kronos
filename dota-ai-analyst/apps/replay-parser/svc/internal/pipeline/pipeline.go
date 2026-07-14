@@ -13,8 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -22,13 +20,33 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
+// Player — строка ростера из сводки ядра (порядок: Radiant 0-4, Dire 5-9).
+type Player struct {
+	Team int    `json:"team"` // 2 = Radiant, 3 = Dire
+	Name string `json:"name"`
+	Hero string `json:"hero"` // npc_dota_hero_*
+}
+
+// Summary — машиночитаемая сводка demoinfo --summary.
+type Summary struct {
+	MatchID       uint64   `json:"match_id"`
+	Winner        string   `json:"winner"` // "Radiant" | "Dire"
+	GameMode      int      `json:"game_mode"`
+	PlaybackTimeS float64  `json:"playback_time_s"`
+	Build         int      `json:"build"`
+	Players       []Player `json:"players"`
+}
+
 // Result — итог обработки реплея; уходит в payload события replay.parsed.
 type Result struct {
-	MatchID      uint64 `json:"match_id"`
-	EventRows    int    `json:"event_rows"`
-	PositionRows int    `json:"position_rows"`
-	EconomyRows  int    `json:"economy_rows"`
-	DurationMS   int64  `json:"duration_ms"`
+	MatchID      uint64   `json:"match_id"`
+	Winner       string   `json:"winner"`
+	DurationS    float64  `json:"duration_s"`
+	Players      []Player `json:"players"`
+	EventRows    int      `json:"event_rows"`
+	PositionRows int      `json:"position_rows"`
+	EconomyRows  int      `json:"economy_rows"`
+	DurationMS   int64    `json:"duration_ms"`
 }
 
 type Pipeline struct {
@@ -76,26 +94,30 @@ func (p *Pipeline) Run(ctx context.Context, replayURL string) (Result, error) {
 	eventsPath := filepath.Join(tmp, "events.jsonl")
 	posPath := filepath.Join(tmp, "positions.jsonl")
 	ecoPath := filepath.Join(tmp, "economy.jsonl")
-	matchID, err := p.runCore(ctx, demPath, eventsPath, posPath, ecoPath)
+	summaryPath := filepath.Join(tmp, "summary.json")
+	sum, err := p.runCore(ctx, demPath, eventsPath, posPath, ecoPath, summaryPath)
 	if err != nil {
 		return Result{}, err
 	}
 
-	evRows, err := p.loadEvents(ctx, matchID, eventsPath)
+	evRows, err := p.loadEvents(ctx, sum.MatchID, eventsPath)
 	if err != nil {
 		return Result{}, err
 	}
-	posRows, err := p.loadPositions(ctx, matchID, posPath)
+	posRows, err := p.loadPositions(ctx, sum.MatchID, posPath)
 	if err != nil {
 		return Result{}, err
 	}
-	ecoRows, err := p.loadEconomy(ctx, matchID, ecoPath)
+	ecoRows, err := p.loadEconomy(ctx, sum.MatchID, ecoPath)
 	if err != nil {
 		return Result{}, err
 	}
 
 	return Result{
-		MatchID:      matchID,
+		MatchID:      sum.MatchID,
+		Winner:       sum.Winner,
+		DurationS:    sum.PlaybackTimeS,
+		Players:      sum.Players,
 		EventRows:    evRows,
 		PositionRows: posRows,
 		EconomyRows:  ecoRows,
@@ -134,30 +156,33 @@ func (p *Pipeline) download(ctx context.Context, bucket, key, dst string) error 
 	return nil
 }
 
-var matchIDRe = regexp.MustCompile(`match_id\s*:\s*(\d+)`)
-
-// runCore запускает C++ demoinfo и извлекает match_id из его сводки.
-func (p *Pipeline) runCore(ctx context.Context, dem, events, positions, economy string) (uint64, error) {
+// runCore запускает C++ demoinfo и читает машиночитаемую сводку --summary.
+func (p *Pipeline) runCore(ctx context.Context, dem, events, positions,
+	economy, summary string) (Summary, error) {
 	cmd := exec.CommandContext(ctx, p.demoinfo,
-		"--events", events, "--entities", positions, "--economy", economy, dem)
+		"--events", events, "--entities", positions, "--economy", economy,
+		"--summary", summary, dem)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
-		return 0, fmt.Errorf("demoinfo: %w (output tail: %s)", err, tail(out.String(), 400))
+		return Summary{}, fmt.Errorf("demoinfo: %w (output tail: %s)", err, tail(out.String(), 400))
 	}
 	if strings.Contains(out.String(), "DESYNC") {
-		return 0, fmt.Errorf("demoinfo: entity decoder desync")
+		return Summary{}, fmt.Errorf("demoinfo: entity decoder desync")
 	}
-	m := matchIDRe.FindStringSubmatch(out.String())
-	if m == nil {
-		return 0, fmt.Errorf("demoinfo: match_id not found in summary")
-	}
-	id, err := strconv.ParseUint(m[1], 10, 64)
+	raw, err := os.ReadFile(summary)
 	if err != nil {
-		return 0, fmt.Errorf("demoinfo: bad match_id %q", m[1])
+		return Summary{}, fmt.Errorf("demoinfo summary: %w", err)
 	}
-	return id, nil
+	var sum Summary
+	if err := json.Unmarshal(raw, &sum); err != nil {
+		return Summary{}, fmt.Errorf("demoinfo summary: %w", err)
+	}
+	if sum.MatchID == 0 {
+		return Summary{}, fmt.Errorf("demoinfo summary: match_id is 0")
+	}
+	return sum, nil
 }
 
 func tail(s string, n int) string {

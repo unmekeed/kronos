@@ -112,6 +112,9 @@ func (c *Consumer) handle(ctx context.Context, rec *kgo.Record) {
 		"match_id:"+fmt.Sprint(res.MatchID), map[string]any{
 			"job_id":        msg.JobID,
 			"match_id":      res.MatchID,
+			"winner":        res.Winner,
+			"duration_s":    res.DurationS,
+			"players":       res.Players,
 			"event_rows":    res.EventRows,
 			"position_rows": res.PositionRows,
 			"economy_rows":  res.EconomyRows,
