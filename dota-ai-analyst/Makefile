@@ -88,3 +88,12 @@ ml-train:      ## Обучить Win Probability (реальные матчи и
 
 report-gen:    ## Запустить Report Generator (Kafka-петля)
 	cd apps/report-generator && PYTHONPATH=src python3 -m reportgen
+
+ml-auto-train: ## Автономное переобучение (порог новых матчей + гейт)
+	cd apps/ml-service && PYTHONPATH=src python3 -m training.auto
+
+stack-up:      ## Весь конвейер в контейнерах (инфраструктура + приложения)
+	$(COMPOSE) --profile apps up -d --build
+
+stack-down:    ## Остановить весь конвейер
+	$(COMPOSE) --profile apps down

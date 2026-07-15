@@ -75,3 +75,42 @@ def test_should_promote_gate():
     ok, _ = should_promote({"brier_calibrated": 0.10},
                            {"brier_calibrated": 0.12})
     assert ok
+
+
+def test_autotrain_thresholds(monkeypatch, tmp_path):
+    """check_and_train: пороги «мало данных» / «мало новых» / «обучаем»."""
+    from training import auto
+
+    ds = synth_matches(60)
+
+    class FakeReg:
+        def __init__(self, trained_on):
+            self.meta = ({"dataset": {"matches": trained_on}}
+                         if trained_on is not None else None)
+
+        def stage_metadata(self, name):
+            return self.meta
+
+    pushed = []
+    monkeypatch.setattr(auto, "load_from_clickhouse",
+                        lambda *a, **k: ds)
+    monkeypatch.setattr(auto, "push_with_gate",
+                        lambda art, path, log: pushed.append(art))
+    monkeypatch.setattr(auto, "train",
+                        lambda d: {"metrics": {"brier_calibrated": 0.1}})
+
+    out = tmp_path / "m.pkl"
+    # Всего матчей меньше минимума.
+    monkeypatch.setattr(auto, "registry_from_env", lambda: FakeReg(0))
+    assert auto.check_and_train(20, 100, out) == "not-enough-data"
+    # Production обучена на 50, новых 10 < 20 — пропуск.
+    monkeypatch.setattr(auto, "registry_from_env", lambda: FakeReg(50))
+    assert auto.check_and_train(20, 50, out) == "not-enough-new"
+    assert not pushed
+    # Новых 25 >= 20 — обучаем и пушим.
+    monkeypatch.setattr(auto, "registry_from_env", lambda: FakeReg(35))
+    assert auto.check_and_train(20, 50, out) == "trained"
+    assert len(pushed) == 1
+    # Production нет вообще — обучаем при достаточном датасете.
+    monkeypatch.setattr(auto, "registry_from_env", lambda: FakeReg(None))
+    assert auto.check_and_train(20, 50, out) == "trained"
