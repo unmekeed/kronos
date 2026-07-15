@@ -68,6 +68,17 @@ def train(ds: Dataset, num_rounds: int = 300) -> dict:
         "valid_rows": int(len(y_va)),
         "best_iteration": int(booster.best_iteration or num_rounds),
     }
+
+    # Эталон: матчи про-команд (tier=Professional) — вне train/valid.
+    # Метрика на них показывает перенос модели, обученной на high-rank
+    # пабликах, на тир-1 игру; в гейте продвижения НЕ участвует (пока
+    # эталонная выборка мала), но фиксируется в каждой версии.
+    X_bm, y_bm = ds.benchmark()
+    if len(y_bm) > 0:
+        cal_bm = calibrator.predict(booster.predict(X_bm))
+        metrics["brier_benchmark_pro"] = round(
+            float(brier_score_loss(y_bm, cal_bm)), 4)
+        metrics["benchmark_rows"] = int(len(y_bm))
     return {
         "model_version": MODEL_VERSION,
         "algo": "lightgbm+isotonic",
@@ -88,14 +99,37 @@ def train(ds: Dataset, num_rounds: int = 300) -> dict:
 MODEL_NAME = "win_probability"
 
 
-def push_with_gate(artifact: dict, out_path: Path, logger_) -> None:
-    """Загрузить версию в реестр; продвинуть в production, если Brier
-    calibrated не хуже текущей production-версии (или её нет).
+def should_promote(new_metrics: dict, prod_metrics: dict | None) -> tuple[bool, str]:
+    """Решение промоушен-гейта (Гл. 10).
 
-    Гейт по метрике — минимальный вариант промоушен-политики Гл. 10:
-    регресс качества не попадает в сервинг автоматически, но версия
-    сохраняется и может быть продвинута вручную (registry.promote).
+    Сравнение ТОЛЬКО по сопоставимым выборкам: приоритет — Brier на
+    про-эталоне (фиксированная популяция tier-1 матчей); валидационный
+    Brier версий с разными датасетами несопоставим (маленькая валидация
+    льстит метрике). Если у production-версии эталонной метрики нет —
+    её оценка не сопоставима с новой, продвигаем новую.
     """
+    if prod_metrics is None:
+        return True, "первая версия"
+    new_bm = new_metrics.get("brier_benchmark_pro")
+    prod_bm = prod_metrics.get("brier_benchmark_pro")
+    if new_bm is not None and prod_bm is not None:
+        if new_bm <= prod_bm:
+            return True, f"benchmark {new_bm:.4f} <= prod {prod_bm:.4f}"
+        return False, f"benchmark {new_bm:.4f} > prod {prod_bm:.4f}"
+    if new_bm is not None and prod_bm is None:
+        return True, ("у production нет эталонной метрики — "
+                      "валидации несопоставимы, продвигаем оцененную на эталоне")
+    # Эталона нет ни у кого — остаётся валидационный Brier.
+    new_v = new_metrics.get("brier_calibrated", float("inf"))
+    prod_v = prod_metrics.get("brier_calibrated", float("inf"))
+    if new_v <= prod_v:
+        return True, f"valid {new_v:.4f} <= prod {prod_v:.4f}"
+    return False, f"valid {new_v:.4f} > prod {prod_v:.4f}"
+
+
+def push_with_gate(artifact: dict, out_path: Path, logger_) -> None:
+    """Загрузить версию в реестр; продвинуть через гейт should_promote.
+    Непродвинутая версия сохраняется и может быть продвинута вручную."""
     from registry import registry_from_env
 
     reg = registry_from_env()
@@ -107,21 +141,15 @@ def push_with_gate(artifact: dict, out_path: Path, logger_) -> None:
         "dataset": artifact["dataset"],
         "trained_at": artifact["trained_at"],
     })
-    new_brier = artifact["metrics"]["brier_calibrated"]
     prod = reg.stage_metadata(MODEL_NAME)
-    if prod is None:
+    ok, reason = should_promote(artifact["metrics"],
+                                prod.get("metrics") if prod else None)
+    if ok:
         reg.promote(MODEL_NAME, version)
-        logger_.info("registry: %s promoted to production (первая версия)",
-                     version)
-        return
-    prod_brier = prod.get("metrics", {}).get("brier_calibrated", float("inf"))
-    if new_brier <= prod_brier:
-        reg.promote(MODEL_NAME, version)
-        logger_.info("registry: %s promoted (brier %.4f <= prod %.4f)",
-                     version, new_brier, prod_brier)
+        logger_.info("registry: %s promoted (%s)", version, reason)
     else:
-        logger_.warning("registry: %s NOT promoted (brier %.4f > prod %.4f, "
-                        "версия сохранена)", version, new_brier, prod_brier)
+        logger_.warning("registry: %s NOT promoted (%s), версия сохранена",
+                        version, reason)
 
 
 def main() -> int:

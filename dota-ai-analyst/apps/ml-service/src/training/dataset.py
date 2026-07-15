@@ -25,6 +25,9 @@ FEATURES = [
 ]
 
 
+PRO_TIER = "Professional"
+
+
 @dataclass
 class Dataset:
     X: np.ndarray            # (n, len(FEATURES))
@@ -32,16 +35,32 @@ class Dataset:
     groups: np.ndarray       # (n,) match_id — для group split
     n_matches: int
     n_synthetic: int = 0
+    # tier строки ('' для старых/синтетических данных). Матчи
+    # PRO_TIER — эталонный holdout: НИКОГДА не попадают в train/valid.
+    tiers: np.ndarray | None = None
+
+    def _tier_mask(self, tier: str) -> np.ndarray:
+        if self.tiers is None:
+            return np.zeros(len(self.y), dtype=bool)
+        return self.tiers == tier
+
+    def benchmark(self) -> tuple[np.ndarray, np.ndarray]:
+        """Эталонная выборка (матчи про-команд)."""
+        m = self._tier_mask(PRO_TIER)
+        return self.X[m], self.y[m]
 
     def split_by_match(self, valid_frac: float = 0.2, seed: int = 42):
-        """Group split: матч целиком уходит либо в train, либо в valid."""
+        """Group split по НЕэталонным матчам: матч целиком в train или valid."""
+        pro = self._tier_mask(PRO_TIER)
         rng = random.Random(seed)
-        matches = sorted(set(self.groups.tolist()))
+        matches = sorted(set(self.groups[~pro].tolist()))
         rng.shuffle(matches)
         n_valid = max(1, int(len(matches) * valid_frac))
         valid_set = set(matches[:n_valid])
-        mask = np.array([g in valid_set for g in self.groups])
-        return (self.X[~mask], self.y[~mask]), (self.X[mask], self.y[mask])
+        in_valid = np.array([g in valid_set for g in self.groups])
+        tr = ~in_valid & ~pro
+        va = in_valid & ~pro
+        return (self.X[tr], self.y[tr]), (self.X[va], self.y[va])
 
 
 def row_to_features(row: dict) -> list[float]:
@@ -62,7 +81,7 @@ def load_from_clickhouse(url: str, database: str, user: str, password: str) -> D
         url,
         params={"database": database, "default_format": "JSONEachRow"},
         data="SELECT match_id, game_time, networth_diff, xp_diff,"
-             "       kills_radiant, kills_dire, radiant_win"
+             "       kills_radiant, kills_dire, radiant_win, tier"
              "  FROM MatchTimelineFeatures FINAL ORDER BY match_id, game_time",
         headers={"X-ClickHouse-User": user, "X-ClickHouse-Key": password},
         timeout=120,
@@ -75,8 +94,9 @@ def load_from_clickhouse(url: str, database: str, user: str, password: str) -> D
     X = np.array([row_to_features(r) for r in rows], dtype=np.float64)
     y = np.array([int(r["radiant_win"]) for r in rows], dtype=np.int64)
     groups = np.array([int(r["match_id"]) for r in rows], dtype=np.int64)
+    tiers = np.array([str(r.get("tier", "")) for r in rows])
     return Dataset(X=X, y=y, groups=groups,
-                   n_matches=len(set(groups.tolist())))
+                   n_matches=len(set(groups.tolist())), tiers=tiers)
 
 
 # -- Синтетические матчи ------------------------------------------------------
@@ -119,12 +139,15 @@ def merge(a: Dataset, b: Dataset) -> Dataset:
         return b
     if b.X.size == 0:
         return a
+    tiers_a = a.tiers if a.tiers is not None else np.array([""] * len(a.y))
+    tiers_b = b.tiers if b.tiers is not None else np.array([""] * len(b.y))
     return Dataset(
         X=np.vstack([a.X, b.X]),
         y=np.concatenate([a.y, b.y]),
         groups=np.concatenate([a.groups, b.groups]),
         n_matches=a.n_matches + b.n_matches,
         n_synthetic=a.n_synthetic + b.n_synthetic,
+        tiers=np.concatenate([tiers_a, tiers_b]),
     )
 
 

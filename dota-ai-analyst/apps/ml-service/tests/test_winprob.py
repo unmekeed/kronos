@@ -49,3 +49,29 @@ def test_dataset_hash_stable_and_merge():
     assert dataset_hash(a) != dataset_hash(b)
     m = merge(a, b)
     assert m.n_matches == 10 and len(m.y) == len(a.y) + len(b.y)
+
+
+def test_should_promote_gate():
+    from training.train_winprob import should_promote
+
+    # Первая версия — всегда promote.
+    ok, _ = should_promote({"brier_calibrated": 0.2}, None)
+    assert ok
+    # Оба с эталоном: решает эталон, валидация игнорируется.
+    ok, _ = should_promote(
+        {"brier_benchmark_pro": 0.14, "brier_calibrated": 0.30},
+        {"brier_benchmark_pro": 0.15, "brier_calibrated": 0.05})
+    assert ok
+    ok, _ = should_promote(
+        {"brier_benchmark_pro": 0.16, "brier_calibrated": 0.01},
+        {"brier_benchmark_pro": 0.15, "brier_calibrated": 0.30})
+    assert not ok
+    # У production нет эталона — новая (оцененная) продвигается.
+    ok, reason = should_promote(
+        {"brier_benchmark_pro": 0.15, "brier_calibrated": 0.17},
+        {"brier_calibrated": 0.08})
+    assert ok and "несопоставим" in reason
+    # Ни у кого нет эталона — fallback на валидацию.
+    ok, _ = should_promote({"brier_calibrated": 0.10},
+                           {"brier_calibrated": 0.12})
+    assert ok

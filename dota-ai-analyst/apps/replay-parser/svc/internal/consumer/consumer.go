@@ -40,6 +40,7 @@ type matchDownloaded struct {
 	JobID     string `json:"job_id"`
 	ReplayURL string `json:"replay_url"`
 	Source    string `json:"source"`
+	Tier      string `json:"tier"` // Premium | Professional | ... (Гл. 4.2)
 }
 
 type Consumer struct {
@@ -112,6 +113,7 @@ func (c *Consumer) handle(ctx context.Context, rec *kgo.Record) {
 		"match_id:"+fmt.Sprint(res.MatchID), map[string]any{
 			"job_id":        msg.JobID,
 			"match_id":      res.MatchID,
+			"tier":          msg.Tier,
 			"winner":        res.Winner,
 			"duration_s":    res.DurationS,
 			"players":       res.Players,

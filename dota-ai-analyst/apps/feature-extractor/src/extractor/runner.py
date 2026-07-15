@@ -66,7 +66,8 @@ class Extractor:
     # -- обработка одного матча ------------------------------------------------
 
     def process_match(self, match_id: int, players: list[dict], winner: str,
-                      duration_s: float, trace_id: str | None) -> dict:
+                      duration_s: float, trace_id: str | None,
+                      tier: str = "") -> dict:
         roster = Roster.from_players(players, winner)
 
         economy = self.ch.select(
@@ -88,8 +89,10 @@ class Extractor:
         trows = timeline_features(economy, kills, roster)
         for r in prows:
             r["match_id"] = match_id
+            r["tier"] = tier
         for r in trows:
             r["match_id"] = match_id
+            r["tier"] = tier
 
         self.ch.insert_rows("PlayerMatchFeatures", prows)
         self.ch.insert_rows("MatchTimelineFeatures", trows)
@@ -148,6 +151,7 @@ class Extractor:
             players = payload.get("players") or []
             winner = payload.get("winner", "")
             duration_s = float(payload.get("duration_s", 0))
+            tier = str(payload.get("tier", "") or "")
         except (ValueError, KeyError, TypeError) as exc:
             logger.error("bad replay.parsed event, skipping: %s", exc)
             return
@@ -157,6 +161,6 @@ class Extractor:
             return
         try:
             self.process_match(match_id, players, winner, duration_s,
-                               env.get("trace_id"))
+                               env.get("trace_id"), tier=tier)
         except Exception:  # noqa: BLE001 — логируем и не блокируем партицию
             logger.exception("feature extraction failed for match %s", match_id)

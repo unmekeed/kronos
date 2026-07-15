@@ -110,7 +110,17 @@ class Collector:
                 logger.info("skip duplicate match_id=%s", ref.match_id)
                 continue
 
-            data = self._source.download_replay(ref)
+            # Сбой одного матча (503 реплей-сервера, битый bz2, сеть) не
+            # должен ронять весь цикл (Гл. 2.4.2): логируем и идём дальше.
+            # Курсор для неудачного матча не фиксируется — он будет
+            # повторён следующим циклом, если позже не перекроется курсором
+            # более нового успешного матча (для пабликов это приемлемо).
+            try:
+                data = self._source.download_replay(ref)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("match %s: download failed (%s), пропуск",
+                               ref.match_id, exc)
+                continue
             object_key = f"{self._source.name}/{ref.match_id}.dem"
             self._s3.put_object(self._cfg.s3_bucket, object_key,
                                 io.BytesIO(data), len(data),
