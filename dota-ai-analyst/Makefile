@@ -67,3 +67,17 @@ parser-svc: parser-build  ## Запустить Go-обвязку парсера
 	cd apps/replay-parser/svc && \
 		DEMOINFO_PATH=$(CURDIR)/apps/replay-parser/build/demoinfo \
 		go run ./cmd/parser-svc
+
+## ML Service ------------------------------------------------------------------
+
+proto-gen:     ## Сгенерировать Python-стабы gRPC из proto/ (источник истины)
+	python3 -m grpc_tools.protoc -I proto \
+		--python_out=apps/ml-service/src/gen \
+		--grpc_python_out=apps/ml-service/src/gen \
+		proto/services.proto
+
+ml-serve:      ## Запустить gRPC-сервер ML Service
+	cd apps/ml-service && PYTHONPATH=src python3 -m app
+
+ml-train:      ## Обучить Win Probability (реальные матчи из ClickHouse)
+	cd apps/ml-service && PYTHONPATH=src python3 -m training.train_winprob $(TRAIN_ARGS)

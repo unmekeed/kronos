@@ -116,6 +116,11 @@ class Extractor:
             "group.id": self.cfg.group_id,
             "auto.offset.reset": "earliest",
             "enable.auto.commit": False,
+            # Агрессивные таймауты: зависшее после сна/рестарта брокера
+            # соединение должно рваться и пересоздаваться, а не молчать.
+            "socket.keepalive.enable": True,
+            "session.timeout.ms": 15000,
+            "reconnect.backoff.max.ms": 5000,
         })
         consumer.subscribe([TOPIC_IN])
         logger.info("feature-extractor started: brokers=%s topic=%s",

@@ -8,7 +8,9 @@ COPY src/ src/
 COPY models/ models/
 ENV PYTHONPATH=/app/src
 USER nobody
+EXPOSE 50051
+# По умолчанию — gRPC-сервер инференса (MLService, Гл. 3.7).
 # Обучение: docker run ... -m training.train_winprob
-# Инференс-CLI: docker run ... -m predictors.win_probability MATCH_ID
+# CLI WP-кривой: docker run ... -m predictors.win_probability MATCH_ID
 ENTRYPOINT ["python"]
-CMD ["-m", "predictors.win_probability", "--help"]
+CMD ["-m", "app"]
