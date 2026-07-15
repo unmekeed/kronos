@@ -12,6 +12,23 @@ import time
 from .runner import Collector, CollectorConfig
 from .sources.fixture import FixtureSource
 from .sources.opendota import OpenDotaSource
+from .sources.opendota_public import OpenDotaPublicSource
+
+
+def build_source(name: str):
+    limit = int(os.getenv("OPENDOTA_LIMIT", "3"))
+    if name == "fixture":
+        return FixtureSource()
+    if name == "opendota":
+        return OpenDotaSource(limit_per_cycle=limit)
+    if name == "opendota-public":
+        min_patch = os.getenv("OPENDOTA_MIN_PATCH")
+        return OpenDotaPublicSource(
+            limit_per_cycle=limit,
+            min_rank=int(os.getenv("OPENDOTA_MIN_RANK", "80")),
+            min_patch=int(min_patch) if min_patch else None,
+        )
+    raise ValueError(f"unknown source {name!r}")
 
 
 def main() -> None:
@@ -22,14 +39,14 @@ def main() -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", default=os.getenv("COLLECTOR_SOURCE", "fixture"),
-                        choices=["fixture", "opendota"])
+                        choices=["fixture", "opendota", "opendota-public"])
     parser.add_argument("--interval", type=int,
                         default=int(os.getenv("COLLECTOR_INTERVAL_SECONDS", "300")))
     parser.add_argument("--once", action="store_true",
                         help="один проход и выход (для тестов/CI)")
     args = parser.parse_args()
 
-    source = FixtureSource() if args.source == "fixture" else OpenDotaSource()
+    source = build_source(args.source)
     cfg = CollectorConfig(
         postgres_dsn=os.getenv(
             "POSTGRES_DSN",
