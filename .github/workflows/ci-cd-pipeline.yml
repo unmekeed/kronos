@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [feature-extractor, ml-service]
+        service: [feature-extractor, ml-service, report-generator]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

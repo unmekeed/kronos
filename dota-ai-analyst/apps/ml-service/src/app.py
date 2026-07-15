@@ -100,7 +100,12 @@ def _resolve_model_path(spec: str | os.PathLike) -> str | os.PathLike:
 def build_server(model_path: str | os.PathLike, port: int) -> tuple[grpc.Server, int]:
     """Собрать сервер; port=0 выбирает свободный порт (для тестов)."""
     model = WinProbability(_resolve_model_path(model_path))
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    # SO_REUSEPORT выключен: gRPC по умолчанию позволяет НЕСКОЛЬКИМ
+    # процессам слушать один порт, и ядро молча балансирует соединения
+    # между ними — задвоенный сервер со старой моделью отдавал бы часть
+    # ответов незаметно. Пусть второй запуск падает с "address in use".
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8),
+                         options=[("grpc.so_reuseport", 0)])
     services_pb2_grpc.add_MLServiceServicer_to_server(MLService(model), server)
     bound = server.add_insecure_port(f"[::]:{port}")
     return server, bound

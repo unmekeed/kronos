@@ -159,3 +159,39 @@ func (h *Handlers) GetJob(w http.ResponseWriter, r *http.Request) {
 		"created_at": createdAt,
 	})
 }
+
+// reportColumn отдаёт JSONB-колонку отчёта из MatchReports как есть:
+// отчёт материализован Report Generator'ом, путь чтения — один SELECT.
+func (h *Handlers) reportColumn(w http.ResponseWriter, r *http.Request,
+	column string) {
+	matchID := r.PathValue("matchId")
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	var body []byte
+	// column подставляется только из фиксированного списка вызовов ниже.
+	err := h.DB.QueryRow(ctx,
+		`SELECT `+column+`::text FROM MatchReports WHERE match_id = $1`,
+		matchID).Scan(&body)
+	if err != nil {
+		writeProblem(w, http.StatusNotFound, "report-not-found",
+			"Report is not generated yet",
+			fmt.Sprintf("match %s: no report; загрузите реплей или дождитесь обработки", matchID))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+// GetMatchTimeline — GET /api/v1/matches/{matchId}/timeline (схема Timeline):
+// поминутная WP-кривая и разница net worth.
+func (h *Handlers) GetMatchTimeline(w http.ResponseWriter, r *http.Request) {
+	h.reportColumn(w, r, "timeline")
+}
+
+// GetMatchAnalysis — GET /api/v1/matches/{matchId}/analysis (схема
+// MatchAnalysis): итоговая WP, оценки игроков, нарратив.
+func (h *Handlers) GetMatchAnalysis(w http.ResponseWriter, r *http.Request) {
+	h.reportColumn(w, r, "analysis")
+}
