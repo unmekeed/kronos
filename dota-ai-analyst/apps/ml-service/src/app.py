@@ -77,9 +77,29 @@ class MLService(services_pb2_grpc.MLServiceServicer):
             )
 
 
+def _resolve_model_path(spec: str | os.PathLike) -> str | os.PathLike:
+    """`registry://name/ref` → скачать из реестра во временный файл;
+    иначе — локальный путь как есть."""
+    spec_s = str(spec)
+    if not spec_s.startswith("registry://"):
+        return spec
+    import tempfile
+
+    from registry import registry_from_env
+
+    name, _, ref = spec_s[len("registry://"):].partition("/")
+    artifact, meta = registry_from_env().resolve(name, ref or "production")
+    tmp = tempfile.NamedTemporaryFile(suffix=".pkl", delete=False)
+    tmp.write(artifact)
+    tmp.close()
+    logger.info("model resolved from registry: %s (%s)",
+                meta.get("registry_version"), spec_s)
+    return tmp.name
+
+
 def build_server(model_path: str | os.PathLike, port: int) -> tuple[grpc.Server, int]:
     """Собрать сервер; port=0 выбирает свободный порт (для тестов)."""
-    model = WinProbability(model_path)
+    model = WinProbability(_resolve_model_path(model_path))
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
     services_pb2_grpc.add_MLServiceServicer_to_server(MLService(model), server)
     bound = server.add_insecure_port(f"[::]:{port}")

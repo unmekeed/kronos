@@ -85,12 +85,53 @@ def train(ds: Dataset, num_rounds: int = 300) -> dict:
     }
 
 
+MODEL_NAME = "win_probability"
+
+
+def push_with_gate(artifact: dict, out_path: Path, logger_) -> None:
+    """Загрузить версию в реестр; продвинуть в production, если Brier
+    calibrated не хуже текущей production-версии (или её нет).
+
+    Гейт по метрике — минимальный вариант промоушен-политики Гл. 10:
+    регресс качества не попадает в сервинг автоматически, но версия
+    сохраняется и может быть продвинута вручную (registry.promote).
+    """
+    from registry import registry_from_env
+
+    reg = registry_from_env()
+    version = reg.push(MODEL_NAME, out_path.read_bytes(), {
+        "model_version": artifact["model_version"],
+        "algo": artifact["algo"],
+        "features": artifact["features"],
+        "metrics": artifact["metrics"],
+        "dataset": artifact["dataset"],
+        "trained_at": artifact["trained_at"],
+    })
+    new_brier = artifact["metrics"]["brier_calibrated"]
+    prod = reg.stage_metadata(MODEL_NAME)
+    if prod is None:
+        reg.promote(MODEL_NAME, version)
+        logger_.info("registry: %s promoted to production (первая версия)",
+                     version)
+        return
+    prod_brier = prod.get("metrics", {}).get("brier_calibrated", float("inf"))
+    if new_brier <= prod_brier:
+        reg.promote(MODEL_NAME, version)
+        logger_.info("registry: %s promoted (brier %.4f <= prod %.4f)",
+                     version, new_brier, prod_brier)
+    else:
+        logger_.warning("registry: %s NOT promoted (brier %.4f > prod %.4f, "
+                        "версия сохранена)", version, new_brier, prod_brier)
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     ap = argparse.ArgumentParser()
     ap.add_argument("--synthetic", type=int, default=0,
                     help="добавить N синтетических матчей (smoke-режим)")
     ap.add_argument("--min-matches", type=int, default=20)
+    ap.add_argument("--push", action="store_true",
+                    help="загрузить в реестр моделей (промоушен по Brier-гейту)")
     ap.add_argument("--out", default=str(Path(__file__).resolve().parents[2]
                                          / "models" / "win_probability.pkl"))
     args = ap.parse_args()
@@ -118,6 +159,8 @@ def main() -> int:
     joblib.dump(artifact, out)
     logger.info("metrics: %s", json.dumps(artifact["metrics"]))
     logger.info("artifact saved: %s (%.1f KiB)", out, out.stat().st_size / 1024)
+    if args.push:
+        push_with_gate(artifact, out, logger)
     return 0
 
 
